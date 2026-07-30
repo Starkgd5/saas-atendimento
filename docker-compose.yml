@@ -1,0 +1,127 @@
+version: '3.8'
+
+services:
+  # ============ BANCO DE DADOS ============
+  mariadb:
+    image: mariadb:10.11
+    container_name: saas-mariadb
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: saas_atendimento
+      MYSQL_USER: saas_user
+      MYSQL_PASSWORD: saas_pass
+    ports:
+      - "3306:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - saas-network
+    restart: unless-stopped
+
+  # ============ REDIS ============
+  redis:
+    image: redis:7.2-alpine
+    container_name: saas-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - saas-network
+    restart: unless-stopped
+
+  # ============ IA SERVICE (PYTHON) ============
+  ia-service:
+    build:
+      context: ./ia-service
+      dockerfile: Dockerfile
+    container_name: saas-ia
+    environment:
+      - MODEL_PATH=/models/llama-2-7b.Q4_K_M.gguf
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./ia-service:/app
+      - ./models:/models
+    networks:
+      - saas-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8001/api/ia/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ============ BACKEND GO ============
+  backend-go:
+    build:
+      context: ./backend-go
+      dockerfile: Dockerfile
+    container_name: saas-backend
+    environment:
+      - DB_DSN=saas_user:saas_pass@tcp(mariadb:3306)/saas_atendimento?parseTime=true
+      - REDIS_URL=redis:6379
+      - GIN_MODE=debug
+      - JWT_SECRET=supersecretkey123
+      - IA_URL=http://ia-service:8001
+      - WHATSAPP_PHONE_ID=
+      - WHATSAPP_ACCESS_TOKEN=
+      - WHATSAPP_VERIFY_TOKEN=dev_verify_123
+      - WHATSAPP_API_VERSION=v18.0
+    ports:
+      - "8080:8080"
+    depends_on:
+      mariadb:
+        condition: service_started
+      redis:
+        condition: service_started
+      ia-service:
+        condition: service_healthy
+    volumes:
+      - ./backend-go:/app
+      - /app/tmp
+    networks:
+      - saas-network
+    restart: unless-stopped
+
+  # ============ FRONTEND REACT ============
+  frontend-dev:
+    image: node:18-alpine
+    container_name: saas-frontend
+    working_dir: /app
+    command: sh -c "npm install && npm start"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend-react:/app
+      - /app/node_modules
+    environment:
+      - REACT_APP_API_URL=http://localhost:8080
+      - WDS_SOCKET_PORT=3000
+    networks:
+      - saas-network
+    restart: unless-stopped
+
+  # ============ ADMINER ============
+  adminer:
+    image: adminer:latest
+    container_name: saas-adminer
+    ports:
+      - "8081:8080"
+    environment:
+      - ADMINER_DEFAULT_SERVER=mariadb
+    networks:
+      - saas-network
+    restart: unless-stopped
+
+networks:
+  saas-network:
+    driver: bridge
+
+volumes:
+  mariadb_data:
+  redis_data:

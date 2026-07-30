@@ -1,0 +1,275 @@
+# ============================================
+# BACKEND GO
+# ============================================
+
+# Binários
+/backend-go/*.exe
+/backend-go/*.exe~
+/backend-go/*.dll
+/backend-go/*.so
+/backend-go/*.dylib
+/backend-go/api
+/backend-go/api.exe
+
+# Testes
+/backend-go/*.test
+/backend-go/*.out
+/backend-go/coverage.out
+/backend-go/coverage.html
+
+# Dependências
+/backend-go/vendor/
+/backend-go/go.work
+/backend-go/go.work.sum
+
+# IDE
+/backend-go/.idea/
+/backend-go/.vscode/
+/backend-go/*.iml
+
+# Arquivos temporários
+/backend-go/tmp/
+/backend-go/temp/
+/backend-go/*.log
+
+# ============================================
+# IA SERVICE (PYTHON)
+# ============================================
+
+# Byte-compiled
+/ia-service/__pycache__/
+/ia-service/*.py[cod]
+/ia-service/*$py.class
+
+# Distribuição
+/ia-service/build/
+/ia-service/develop-eggs/
+/ia-service/dist/
+/ia-service/downloads/
+/ia-service/eggs/
+/ia-service/.eggs/
+/ia-service/lib/
+/ia-service/lib64/
+/ia-service/parts/
+/ia-service/sdist/
+/ia-service/var/
+/ia-service/wheels/
+/ia-service/share/python-wheels/
+/ia-service/*.egg-info/
+/ia-service/.installed.cfg
+/ia-service/*.egg
+/ia-service/MANIFEST
+
+# PyInstaller
+/ia-service/*.manifest
+/ia-service/*.spec
+
+# Logs
+/ia-service/*.log
+/ia-service/pip-log.txt
+/ia-service/pip-delete-this-directory.txt
+
+# Testes e cobertura
+/ia-service/htmlcov/
+/ia-service/.tox/
+/ia-service/.nox/
+/ia-service/.coverage
+/ia-service/.coverage.*
+/ia-service/.cache
+/ia-service/nosetests.xml
+/ia-service/coverage.xml
+/ia-service/*.cover
+/ia-service/*.py,cover
+/ia-service/.hypothesis/
+/ia-service/.pytest_cache/
+/ia-service/cover/
+/ia-service/.pytest_cache/
+
+# Ambiente virtual
+/ia-service/.env
+/ia-service/.venv
+/ia-service/env/
+/ia-service/venv/
+/ia-service/ENV/
+/ia-service/env.bak/
+/ia-service/venv.bak/
+/ia-service/.virtualenv
+
+# Editor
+/ia-service/.idea/
+/ia-service/.vscode/
+/ia-service/*.iml
+/ia-service/.spyderproject
+/ia-service/.spyproject
+/ia-service/.ropeproject
+
+# Jupyter
+/ia-service/.ipynb_checkpoints/
+/ia-service/*.ipynb
+
+# Type checking
+/ia-service/.mypy_cache/
+/ia-service/.dmypy.json
+/ia-service/dmypy.json
+/ia-service/.pyre/
+/ia-service/.pytype/
+/ia-service/cython_debug/
+/ia-service/.ruff_cache/
+
+# Modelos grandes
+/ia-service/models/
+/ia-service/*.gguf
+/ia-service/*.bin
+/ia-service/*.onnx
+
+# ============================================
+# FRONTEND REACT
+# ============================================
+
+# Dependências
+/frontend-react/node_modules/
+/frontend-react/.pnp/
+/frontend-react/.pnp.js
+
+# Build
+/frontend-react/build/
+/frontend-react/dist/
+/frontend-react/.next/
+/frontend-react/out/
+
+# Testes
+/frontend-react/coverage/
+/frontend-react/.nyc_output/
+
+# Logs
+/frontend-react/*.log
+/frontend-react/npm-debug.log*
+/frontend-react/yarn-debug.log*
+/frontend-react/yarn-error.log*
+
+# Arquivos de ambiente
+/frontend-react/.env
+/frontend-react/.env.local
+/frontend-react/.env.development.local
+/frontend-react/.env.test.local
+/frontend-react/.env.production.local
+
+# Editor
+/frontend-react/.idea/
+/frontend-react/.vscode/
+/frontend-react/*.iml
+
+# OS
+/frontend-react/.DS_Store
+/frontend-react/Thumbs.db
+
+# ============================================
+# DOCKER
+# ============================================
+
+# Arquivos Docker gerados
+*.tar
+*.tar.gz
+*.tgz
+
+# Volumes Docker locais
+/volumes/
+/data/
+/.docker/
+
+# ============================================
+# GLOBAL
+# ============================================
+
+# Editor
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.tmp
+*.temp
+
+# Backup
+*.bak
+*.backup
+*.old
+
+# Logs
+*.log
+logs/
+*.pid
+*.seed
+*.pid.lock
+
+# Arquivos de configuração local
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Arquivos de credenciais
+*.pem
+*.key
+*.crt
+*.p12
+.secrets/
+credentials.json
+service-account.json
+
+# ============================================
+# SISTEMA
+# ============================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux
+*~
+.directory
+*.swp
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ============================================
+# ARQUIVOS ESPECÍFICOS DO PROJETO
+# ============================================
+
+# Backup do banco
+/backups/
+*.sql
+*.sql.gz
+
+# Modelos de IA
+/models/
+*.gguf
+*.bin
+
+# Documentação gerada
+/docs/_build/
+/docs/api/
+
+# Arquivos temporários
+/tmp/
+/temp/
+*.tmp
+*.temp
+
+# ============================================
+# DEPLOY
+# ============================================
+
+# Arquivos de deploy
+*.deploy
+*.release
+deploy/

@@ -1,0 +1,39 @@
+Estilos adicionais para complementar o Tailwind
+* {
+  box-sizing: border-box;
+}
+
+/* Transições suaves */
+button, .sidebar-item {
+  transition: all 0.2s ease;
+}
+
+/* Estilo para o scroll */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #a8a8a8;
+}
+
+/* Animação de pulso para clientes aguardando */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}

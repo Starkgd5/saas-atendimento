@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="%PUBLIC_URL%/favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="description" content="SaaS Atendimento - Sistema de atendimento com IA" />
+    <link rel="apple-touch-icon" href="%PUBLIC_URL%/logo192.png" />
+    <link rel="manifest" href="%PUBLIC_URL%/manifest.json" />
+    <title>SaaS Atendimento</title>
+    <!-- Tailwind CSS via CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Custom styles -->
+    <style>
+      /* Estilos adicionais se necessário */
+      .chat-bubble-user {
+        @apply bg-blue-500 text-white rounded-xl rounded-tr-sm px-4 py-2 max-w-[70%] self-end;
+      }
+      .chat-bubble-bot {
+        @apply bg-gray-200 text-gray-800 rounded-xl rounded-tl-sm px-4 py-2 max-w-[70%] self-start;
+      }
+      .chat-bubble-attendant {
+        @apply bg-blue-500 text-white rounded-xl rounded-tr-sm px-4 py-2 max-w-[70%] self-end;
+      }
+      .sidebar-item:hover {
+        @apply bg-gray-50;
+      }
+      .sidebar-item.active {
+        @apply bg-blue-50 border-r-4 border-blue-500;
+      }
+      /* Scrollbar customizada */
+      ::-webkit-scrollbar {
+        width: 6px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #f1f1f1;
+        border-radius: 3px;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #c1c1c1;
+        border-radius: 3px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #a8a8a8;
+      }
+    </style>
+  </head>
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+  </body>
+</html>
