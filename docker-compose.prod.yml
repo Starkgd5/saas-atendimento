@@ -1,26 +1,68 @@
 version: '3.8'
 
+# ============================================
+# REDES
+# ============================================
+networks:
+  saas-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+  monitoring:
+    driver: bridge
+
+# ============================================
+# VOLUMES
+# ============================================
+volumes:
+  mariadb_prod_data:
+  redis_prod_data:
+  prometheus_data:
+  grafana_data:
+  nginx_certs:
+  nginx_vhost:
+
+# ============================================
+# SERVIÇOS
+# ============================================
 services:
-  nginx:
+  # ==========================================
+  # NGINX PROXY (Entrada principal)
+  # ==========================================
+  nginx-proxy:
     image: nginx:alpine
-    container_name: saas-nginx
+    container_name: saas-nginx-proxy
+    restart: always
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
-      - ./nginx/ssl:/etc/nginx/ssl
-      - ./frontend-react/build:/usr/share/nginx/html
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - nginx_certs:/etc/nginx/ssl
+      - nginx_vhost:/etc/nginx/vhost.d
+    networks:
+      - saas-network
     depends_on:
       - backend-go
       - frontend
-    networks:
-      - saas-network
-    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.nginx.rule=Host(`${DOMAIN}`)"
 
+  # ==========================================
+  # BANCO DE DADOS
+  # ==========================================
   mariadb:
     image: mariadb:10.11
     container_name: saas-mariadb-prod
+    restart: always
     environment:
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
       MYSQL_DATABASE: ${DB_NAME}
@@ -30,111 +72,330 @@ services:
       - mariadb_prod_data:/var/lib/mysql
       - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
       - ./backups:/backups
+      - ./scripts/mysql.cnf:/etc/mysql/conf.d/custom.cnf:ro
     networks:
       - saas-network
-    restart: always
-    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    command: 
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --max-connections=200
+      - --innodb_buffer_pool_size=1G
+      - --innodb_log_file_size=256M
+      - --innodb_flush_log_at_trx_commit=2
+      - --innodb_flush_method=O_DIRECT
+      - --innodb_io_capacity=200
+      - --innodb_io_capacity_max=400
+      - --max_allowed_packet=256M
+      - --wait_timeout=28800
+      - --interactive_timeout=28800
+      - --net_read_timeout=60
+      - --net_write_timeout=60
+      - --connect_timeout=10
+      - --max_connect_errors=1000
+      - --skip-name-resolve
+      - --log_warnings=0
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
 
+  # ==========================================
+  # REDIS (Cache e Fila)
+  # ==========================================
   redis:
     image: redis:7.2-alpine
     container_name: saas-redis-prod
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    restart: always
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
     volumes:
       - redis_prod_data:/data
     networks:
       - saas-network
-    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
 
+  # ==========================================
+  # BACKEND GO
+  # ==========================================
   backend-go:
     build:
       context: ./backend-go
       dockerfile: Dockerfile.prod
     container_name: saas-backend-prod
+    restart: always
     environment:
-      - DB_DSN=${DB_USER}:${DB_PASSWORD}@tcp(mariadb:3306)/${DB_NAME}?parseTime=true
+      - DB_DSN=${DB_USER}:${DB_PASSWORD}@tcp(mariadb:3306)/${DB_NAME}?parseTime=true&charset=utf8mb4
       - REDIS_URL=redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
       - JWT_SECRET=${JWT_SECRET}
       - WHATSAPP_PHONE_ID=${WHATSAPP_PHONE_ID}
       - WHATSAPP_ACCESS_TOKEN=${WHATSAPP_ACCESS_TOKEN}
       - WHATSAPP_VERIFY_TOKEN=${WHATSAPP_VERIFY_TOKEN}
+      - WHATSAPP_ENABLED=${WHATSAPP_ENABLED}
       - GIN_MODE=release
-      - BASE_URL=${BASE_URL}
+      - BASE_URL=https://${DOMAIN}
       - IA_URL=http://ia-service:8001
-    ports:
-      - "8080:8080"
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+      - OTEL_ENABLED=true
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_SERVICE_NAME=saas-backend
     depends_on:
-      - mariadb
-      - redis
-      - ia-service
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ia-service:
+        condition: service_healthy
     networks:
       - saas-network
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ==========================================
+  # IA SERVICE
+  # ==========================================
+  ia-service:
+    build:
+      context: ./ia-service
+      dockerfile: Dockerfile.prod
+    container_name: saas-ia-prod
     restart: always
+    environment:
+      - MODEL_PATH=/models/llama-2-7b.Q4_K_M.gguf
+      - LIMITE_ORCAMENTO_AUTO=500.00
+      - LOG_LEVEL=info
+      - LOG_FORMAT=json
+      - OTEL_ENABLED=true
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_SERVICE_NAME=saas-ia
+    volumes:
+      - ./models:/models
+    networks:
+      - saas-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8001/api/ia/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ==========================================
+  # FRONTEND REACT
+  # ==========================================
+  frontend:
+    build:
+      context: ./frontend-react
+      dockerfile: Dockerfile.prod
+    container_name: saas-frontend-prod
+    restart: always
+    environment:
+      - REACT_APP_API_URL=/api/v1
+      - REACT_APP_WS_URL=wss://${DOMAIN}/ws
+      - REACT_APP_ENV=production
+      - REACT_APP_NAME=SaaS Atendimento
+      - REACT_APP_VERSION=2.0.0
+      - REACT_APP_DOMAIN=${DOMAIN}
+      - REACT_APP_ENABLE_IA=true
+      - REACT_APP_ENABLE_WHATSAPP=${WHATSAPP_ENABLED}
+      - REACT_APP_ENABLE_METRICS=true
+      - REACT_APP_MAX_CLIENTS_FILA=5
+      - REACT_APP_REFRESH_INTERVAL=60000
+      - REACT_APP_TOAST_DURATION=5000
+    networks:
+      - saas-network
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ==========================================
+  # PROMETHEUS (Monitoramento)
+  # ==========================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: saas-prometheus
+    restart: always
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - monitoring
+      - saas-network
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
 
-  ia-service:
-    build:
-      context: ./ia-service
-      dockerfile: Dockerfile
-    container_name: saas-ia-prod
-    environment:
-      - MODEL_PATH=/models/llama-2-7b.Q4_K_M.gguf
-    volumes:
-      - ./models:/models
-    networks:
-      - saas-network
-    restart: always
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-
-  frontend:
-    build:
-      context: ./frontend-react
-      dockerfile: Dockerfile.prod
-    container_name: saas-frontend-prod
-    environment:
-      - REACT_APP_API_URL=${BASE_URL}/api
-    networks:
-      - saas-network
-    restart: always
-
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: saas-prometheus
-    volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    ports:
-      - "9090:9090"
-    networks:
-      - saas-network
-    restart: always
-
+  # ==========================================
+  # GRAFANA (Dashboards)
+  # ==========================================
   grafana:
     image: grafana/grafana:latest
     container_name: saas-grafana
+    restart: always
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_SERVER_ROOT_URL=https://${DOMAIN}/grafana
     volumes:
       - grafana_data:/var/lib/grafana
       - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
     ports:
       - "3001:3000"
     networks:
+      - monitoring
       - saas-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ==========================================
+  # OPENTELEMETRY COLLECTOR (Tracing)
+  # ==========================================
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: saas-otel-collector
     restart: always
+    volumes:
+      - ./monitoring/otel-collector-config.yaml:/etc/otelcol/config.yaml
+    ports:
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+    networks:
+      - monitoring
+      - saas-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-networks:
-  saas-network:
-    driver: bridge
+  # ==========================================
+  # LOGSTASH (Logs)
+  # ==========================================
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.11.0
+    container_name: saas-logstash
+    restart: always
+    volumes:
+      - ./monitoring/logstash-pipeline.conf:/usr/share/logstash/pipeline/logstash.conf
+    environment:
+      - LS_JAVA_OPTS=-Xmx512m -Xms512m
+    networks:
+      - monitoring
+      - saas-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-volumes:
-  mariadb_prod_data:
-  redis_prod_data:
-  prometheus_data:
-  grafana_data:
+  # ==========================================
+  # ELASTICSEARCH (Logs)
+  # ==========================================
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: saas-elasticsearch
+    restart: always
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+      - xpack.security.enabled=false
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - monitoring
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ==========================================
+  # KIBANA (Visualização de Logs)
+  # ==========================================
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: saas-kibana
+    restart: always
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - SERVER_NAME=kibana
+    ports:
+      - "5601:5601"
+    networks:
+      - monitoring
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

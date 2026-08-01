@@ -1,5 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import Button from '../components/ui/Button';
+import { useWebSocket } from '../hooks/useWebSocket';
+import { useAuth } from '../hooks/useAuth';
+import { useToast } from '../hooks/useToast';
+import FormatterService from '../services/formatter.service';
 import './Atendimento.css';
 
 interface Message {
@@ -7,6 +12,7 @@ interface Message {
   text: string;
   sender: 'user' | 'bot' | 'attendant';
   timestamp: Date;
+  status?: 'sent' | 'delivered' | 'read';
 }
 
 interface Client {
@@ -14,6 +20,8 @@ interface Client {
   name: string;
   phone: string;
   status: 'waiting' | 'attending' | 'done';
+  lastMessage?: string;
+  lastMessageTime?: Date;
 }
 
 const Atendimento: React.FC = () => {
@@ -26,72 +34,37 @@ const Atendimento: React.FC = () => {
   ]);
   const [filaStatus, setFilaStatus] = useState({ emAtendimento: 1, emEspera: 2, limite: 3 });
   const [selectedClient, setSelectedClient] = useState<Client | null>(null);
-  const [ws, setWs] = useState<WebSocket | null>(null);
-  const [isConnected, setIsConnected] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
-
-  // Pegar usuário
-  const user = JSON.parse(localStorage.getItem('user') || '{"nome":"Atendente","role":"atendente"}');
+  const { user } = useAuth();
+  const { isConnected, sendMessage, puxarCliente, on, off } = useWebSocket();
+  const { success, error: showError } = useToast();
 
   useEffect(() => {
-    // Conectar WebSocket
-    const token = localStorage.getItem('token') || '';
-    const wsUrl = `ws://localhost:8080/ws?token=${token}`;
-    const websocket = new WebSocket(wsUrl);
+    // Escutar eventos
+    on('nova_mensagem', (data: any) => {
+      setMessages(prev => [...prev, {
+        id: Date.now(),
+        text: data.mensagem || data.payload?.mensagem,
+        sender: 'user',
+        timestamp: new Date(),
+        status: 'delivered'
+      }]);
+    });
 
-    websocket.onopen = () => {
-      console.log('✅ WebSocket conectado');
-      setIsConnected(true);
-    };
-
-    websocket.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        console.log('📩 Mensagem recebida:', data);
-
-        if (data.type === 'nova_mensagem') {
-          setMessages(prev => [...prev, {
-            id: Date.now(),
-            text: data.payload.mensagem || data.payload.text,
-            sender: 'user',
-            timestamp: new Date()
-          }]);
-        } else if (data.type === 'fila_atualizada') {
-          setFilaStatus(prev => ({
-            ...prev,
-            emAtendimento: data.payload.em_atendimento || prev.emAtendimento,
-            emEspera: data.payload.em_espera || prev.emEspera
-          }));
-        }
-      } catch (error) {
-        console.error('Erro ao processar mensagem WebSocket:', error);
-      }
-    };
-
-    websocket.onerror = (error) => {
-      console.error('❌ Erro no WebSocket:', error);
-    };
-
-    websocket.onclose = () => {
-      console.log('🔌 WebSocket desconectado');
-      setIsConnected(false);
-    };
-
-    setWs(websocket);
-
-    // Mensagens iniciais
-    setMessages([
-      { id: 1, text: 'Olá! Gostaria de um orçamento para Dipirona.', sender: 'user', timestamp: new Date() },
-      { id: 2, text: 'Olá! Vou verificar o estoque para você.', sender: 'attendant', timestamp: new Date() },
-    ]);
+    on('fila_atualizada', (data: any) => {
+      setFilaStatus(prev => ({
+        ...prev,
+        emAtendimento: data.em_atendimento || prev.emAtendimento,
+        emEspera: data.em_espera || prev.emEspera
+      }));
+    });
 
     return () => {
-      if (websocket.readyState === WebSocket.OPEN) {
-        websocket.close();
-      }
+      off('nova_mensagem');
+      off('fila_atualizada');
     };
-  }, []);
+  }, [on, off]);
 
   useEffect(() => {
     scrollToBottom();
@@ -101,44 +74,35 @@ const Atendimento: React.FC = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  const sendMessage = () => {
-    if (!input.trim() || !selectedClient || !ws || ws.readyState !== WebSocket.OPEN) return;
+  const handleSendMessage = useCallback(() => {
+    if (!input.trim() || !selectedClient) return;
 
-    ws.send(JSON.stringify({
-      type: 'nova_mensagem',
-      payload: {
-        cliente_id: selectedClient.id,
-        mensagem: input,
-        remetente: 'atendente'
-      }
-    }));
-
-    setMessages(prev => [...prev, {
+    const newMessage: Message = {
       id: Date.now(),
       text: input,
       sender: 'attendant',
-      timestamp: new Date()
-    }]);
+      timestamp: new Date(),
+      status: 'sent'
+    };
+
+    setMessages(prev => [...prev, newMessage]);
+    
+    // Enviar via WebSocket
+    sendMessage(selectedClient.id, input);
+
     setInput('');
 
+    // Simular entrega
     setTimeout(() => {
-      setMessages(prev => [...prev, {
-        id: Date.now() + 1,
-        text: '✅ Mensagem enviada com sucesso!',
-        sender: 'bot',
-        timestamp: new Date()
-      }]);
-    }, 1000);
-  };
+      setMessages(prev => prev.map(msg => 
+        msg.id === newMessage.id ? { ...msg, status: 'delivered' } : msg
+      ));
+    }, 500);
+  }, [input, selectedClient, sendMessage]);
 
-  const handlePuxarCliente = () => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-    ws.send(JSON.stringify({
-      type: 'puxar_cliente',
-      payload: {}
-    }));
-
+  const handlePuxarCliente = useCallback(() => {
+    puxarCliente();
+    
     const waitingClients = clients.filter(c => c.status === 'waiting');
     if (waitingClients.length > 0 && filaStatus.emAtendimento < filaStatus.limite) {
       const client = waitingClients[0];
@@ -151,156 +115,130 @@ const Atendimento: React.FC = () => {
         emEspera: prev.emEspera - 1
       }));
       setSelectedClient(client);
+      setMessages([]);
+      success(`Cliente ${client.name} puxado para atendimento`);
+    }
+  }, [clients, filaStatus, puxarCliente, success]);
+
+  const handleSelectClient = (client: Client) => {
+    setSelectedClient(client);
+    setMessages([]);
+  };
+
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage();
     }
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
-    navigate('/login');
-  };
+  const timeAgo = FormatterService.timeAgo;
 
   return (
-    <div className="flex h-screen bg-gray-100 font-sans">
+    <div className="atendimento-container">
       {/* Sidebar */}
-      <div className="w-80 bg-white border-r border-gray-200 flex flex-col shadow-lg">
-        {/* Header da Sidebar */}
-        <div className="p-4 border-b border-gray-200 bg-gradient-to-r from-blue-50 to-white">
-          <div className="flex justify-between items-center">
-            <h2 className="text-lg font-bold text-gray-800">💬 Atendimentos</h2>
-            <span className={`text-xs px-2 py-1 rounded-full ${isConnected ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+      <div className="atendimento-sidebar">
+        <div className="atendimento-sidebar-header">
+          <div className="header-top">
+            <h2>💬 Atendimentos</h2>
+            <span className={`status-badge ${isConnected ? 'online' : 'offline'}`}>
               {isConnected ? '🟢 Online' : '🔴 Offline'}
             </span>
           </div>
-
-          {/* Info do usuário */}
-          <div className="mt-2 text-xs text-gray-500">
-            👤 {user.nome} ({user.role})
+          <div className="user-info">
+            👤 {user?.nome} ({user?.role})
           </div>
-
-          <div className="mt-3 flex justify-between text-sm">
-            <span className="bg-green-100 text-green-700 px-3 py-1 rounded-full">
-              👤 {filaStatus.emAtendimento} atendendo
-            </span>
-            <span className="bg-yellow-100 text-yellow-700 px-3 py-1 rounded-full">
-              ⏳ {filaStatus.emEspera} na fila
-            </span>
-            <span className="bg-gray-100 text-gray-600 px-3 py-1 rounded-full">
-              📊 {filaStatus.limite} limite
-            </span>
+          <div className="fila-stats">
+            <span className="atendendo">👤 {filaStatus.emAtendimento} atendendo</span>
+            <span className="espera">⏳ {filaStatus.emEspera} na fila</span>
+            <span className="limite">📊 {filaStatus.limite} limite</span>
           </div>
-
-          <button
+          <Button
             onClick={handlePuxarCliente}
             disabled={filaStatus.emAtendimento >= filaStatus.limite || !isConnected}
-            className={`mt-3 w-full px-4 py-2.5 rounded-lg font-medium transition ${
-              filaStatus.emAtendimento >= filaStatus.limite || !isConnected
-                ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                : 'bg-blue-500 text-white hover:bg-blue-600 active:scale-95'
-            }`}
+            variant="primary"
+            fullWidth
+            className="btn-puxar"
+            icon="🎯"
           >
             {!isConnected ? '🔌 Conectando...' : 
-             filaStatus.emAtendimento >= filaStatus.limite ? '⛔ Limite atingido' : '🎯 Puxar Próximo'}
-          </button>
+             filaStatus.emAtendimento >= filaStatus.limite ? '⛔ Limite atingido' : 'Puxar Próximo'}
+          </Button>
         </div>
 
-        {/* Lista de clientes */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="client-list">
           {clients.map(client => (
             <div
               key={client.id}
-              onClick={() => setSelectedClient(client)}
-              className={`p-4 border-b border-gray-100 cursor-pointer transition ${
-                selectedClient?.id === client.id 
-                  ? 'bg-blue-50 border-r-4 border-blue-500' 
-                  : 'hover:bg-gray-50'
-              }`}
+              onClick={() => handleSelectClient(client)}
+              className={`client-item ${selectedClient?.id === client.id ? 'active' : ''}`}
             >
-              <div className="flex justify-between items-start">
-                <div className="flex-1 min-w-0">
-                  <p className="font-medium text-gray-800 truncate">{client.name}</p>
-                  <p className="text-sm text-gray-500 truncate">{client.phone}</p>
-                </div>
-                <span className={`text-xs px-2.5 py-1 rounded-full whitespace-nowrap ml-2 ${
-                  client.status === 'attending' 
-                    ? 'bg-green-100 text-green-700' 
-                    : 'bg-yellow-100 text-yellow-700'
-                }`}>
-                  {client.status === 'attending' ? '🟢 Atendendo' : '🟡 Aguardando'}
-                </span>
+              <div className="client-info">
+                <p className="client-name">{client.name}</p>
+                <p className="client-phone">{client.phone}</p>
               </div>
+              <span className={`client-status ${client.status}`}>
+                {client.status === 'attending' ? '🟢 Atendendo' : '🟡 Aguardando'}
+              </span>
             </div>
           ))}
         </div>
 
-        {/* Footer da Sidebar */}
-        <div className="p-3 border-t border-gray-200 bg-gray-50 flex justify-between items-center">
-          <span className="text-xs text-gray-500">
-            Total: {clients.length} clientes
-          </span>
-          <button
-            onClick={handleLogout}
-            className="text-xs text-red-500 hover:text-red-700"
+        <div className="sidebar-footer">
+          <span>Total: {clients.length} clientes</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => navigate('/dashboard')}
+            icon="📊"
           >
-            🚪 Sair
-          </button>
+            Dashboard
+          </Button>
         </div>
       </div>
 
       {/* Chat */}
-      <div className="flex-1 flex flex-col bg-gray-50">
+      <div className="atendimento-chat">
         {selectedClient ? (
           <>
-            {/* Header do Chat */}
-            <div className="bg-white border-b border-gray-200 p-4 flex items-center shadow-sm">
-              <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full flex items-center justify-center text-white font-bold text-lg shadow">
+            <div className="chat-header">
+              <div className="chat-avatar">
                 {selectedClient.name.charAt(0)}
               </div>
-              <div className="ml-3">
-                <p className="font-medium text-gray-800">{selectedClient.name}</p>
-                <p className="text-sm text-gray-500">{selectedClient.phone}</p>
+              <div className="chat-client-info">
+                <p className="chat-client-name">{selectedClient.name}</p>
+                <p className="chat-client-phone">{selectedClient.phone}</p>
               </div>
-              <div className="ml-auto flex items-center gap-3">
-                <span className={`text-sm ${isConnected ? 'text-green-500' : 'text-red-500'}`}>
-                  {isConnected ? '🟢 Online' : '🔴 Offline'}
-                </span>
-                <button className="text-gray-400 hover:text-gray-600">
-                  ⋮
-                </button>
+              <div className="chat-status online">
+                {isConnected ? '🟢 Online' : '🔴 Offline'}
               </div>
             </div>
 
-            {/* Mensagens */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-2.5 bg-gray-50">
+            <div className="chat-messages">
               {messages.length === 0 ? (
-                <div className="flex items-center justify-center h-full text-gray-400">
-                  <p>Nenhuma mensagem ainda</p>
+                <div className="chat-empty">
+                  <div className="chat-empty-icon">💬</div>
+                  <p className="chat-empty-title">Nenhuma mensagem ainda</p>
+                  <p className="chat-empty-sub">Inicie a conversa com o cliente</p>
                 </div>
               ) : (
                 messages.map((msg, index) => (
                   <div
                     key={index}
-                    className={`flex ${msg.sender === 'attendant' || msg.sender === 'bot' ? 'justify-end' : 'justify-start'}`}
+                    className={`message-wrapper ${msg.sender === 'attendant' || msg.sender === 'bot' ? 'own' : 'other'}`}
                   >
-                    <div
-                      className={`max-w-[75%] rounded-2xl px-4 py-2.5 shadow-sm ${
-                        msg.sender === 'attendant' || msg.sender === 'bot'
-                          ? 'bg-blue-500 text-white rounded-br-sm'
-                          : 'bg-white text-gray-800 rounded-bl-sm'
-                      }`}
-                    >
-                      <p className="text-sm leading-relaxed">{msg.text}</p>
-                      <p className={`text-xs mt-1 ${
-                        msg.sender === 'attendant' || msg.sender === 'bot'
-                          ? 'text-blue-100'
-                          : 'text-gray-400'
-                      }`}>
-                        {msg.timestamp.toLocaleTimeString('pt-BR', { 
-                          hour: '2-digit', 
-                          minute: '2-digit' 
-                        })}
-                        {msg.sender === 'attendant' && ' ✅'}
-                      </p>
+                    <div className={`message-bubble ${msg.sender === 'attendant' || msg.sender === 'bot' ? 'own' : 'other'}`}>
+                      <p className="text">{msg.text}</p>
+                      <span className="time">
+                        {FormatterService.formatTime(msg.timestamp)}
+                        {msg.sender === 'attendant' && (
+                          <span className="check">
+                            {msg.status === 'sent' && ' ✓'}
+                            {msg.status === 'delivered' && ' ✓✓'}
+                            {msg.status === 'read' && ' ✓✓'}
+                          </span>
+                        )}
+                      </span>
                     </div>
                   </div>
                 ))
@@ -308,29 +246,25 @@ const Atendimento: React.FC = () => {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Input */}
-            <div className="bg-white border-t border-gray-200 p-4 shadow-lg">
-              <div className="flex gap-2.5">
+            <div className="chat-input-area">
+              <div className="input-wrapper">
                 <input
                   type="text"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
+                  onKeyPress={handleKeyPress}
                   placeholder={isConnected ? "Digite sua mensagem..." : "🔌 Aguardando conexão..."}
                   disabled={!isConnected}
-                  className="flex-1 px-4 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition disabled:bg-gray-100"
+                  className="chat-input"
                 />
-                <button
-                  onClick={sendMessage}
+                <Button
+                  onClick={handleSendMessage}
                   disabled={!input.trim() || !isConnected}
-                  className={`px-6 py-2.5 rounded-xl font-medium transition ${
-                    input.trim() && isConnected
-                      ? 'bg-blue-500 text-white hover:bg-blue-600 active:scale-95'
-                      : 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                  }`}
+                  variant="primary"
+                  icon="📤"
                 >
-                  📤 Enviar
-                </button>
+                  Enviar
+                </Button>
               </div>
             </div>
           </>

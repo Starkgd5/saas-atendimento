@@ -5,19 +5,48 @@ services:
   mariadb:
     image: mariadb:10.11
     container_name: saas-mariadb
+    restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: root123
-      MYSQL_DATABASE: saas_atendimento
-      MYSQL_USER: saas_user
-      MYSQL_PASSWORD: saas_pass
-    ports:
-      - "3306:3306"
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
     volumes:
-      - mariadb_data:/var/lib/mysql
+      - saas-mariadb:/var/lib/mysql
       - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./backups:/backups
+      - ./scripts/mysql.cnf:/etc/mysql/conf.d/custom.cnf:ro
     networks:
       - saas-network
-    restart: unless-stopped
+    command: 
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --max-connections=200
+      - --innodb_buffer_pool_size=1G
+      - --innodb_log_file_size=256M
+      - --innodb_flush_log_at_trx_commit=2
+      - --innodb_flush_method=O_DIRECT
+      - --innodb_io_capacity=200
+      - --innodb_io_capacity_max=400
+      - --max_allowed_packet=256M
+      - --wait_timeout=28800
+      - --interactive_timeout=28800
+      - --net_read_timeout=60
+      - --net_write_timeout=60
+      - --connect_timeout=10
+      - --max_connect_errors=1000
+      - --skip-name-resolve
+      - --log_warnings=0
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   # ============ REDIS ============
   redis:
@@ -31,6 +60,11 @@ services:
     networks:
       - saas-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
   # ============ IA SERVICE (PYTHON) ============
   ia-service:
@@ -41,6 +75,7 @@ services:
     environment:
       - MODEL_PATH=/models/llama-2-7b.Q4_K_M.gguf
       - PYTHONUNBUFFERED=1
+      - LIMITE_ORCAMENTO_AUTO=${IA_LIMITE_AUTO:-500.00}
     ports:
       - "8001:8001"
     volumes:
@@ -63,22 +98,32 @@ services:
       dockerfile: Dockerfile
     container_name: saas-backend
     environment:
-      - DB_DSN=saas_user:saas_pass@tcp(mariadb:3306)/saas_atendimento?parseTime=true
+      # Usando DB_USER e DB_PASSWORD do .env, não root
+      - DB_DSN=${DB_USER}:${DB_PASSWORD}@tcp(mariadb:3306)/${DB_NAME}?parseTime=true&charset=utf8mb4&timeout=30s
       - REDIS_URL=redis:6379
-      - GIN_MODE=debug
-      - JWT_SECRET=supersecretkey123
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - GIN_MODE=${GIN_MODE:-debug}
+      - JWT_SECRET=${JWT_SECRET:-supersecretkey123}
       - IA_URL=http://ia-service:8001
-      - WHATSAPP_PHONE_ID=
-      - WHATSAPP_ACCESS_TOKEN=
-      - WHATSAPP_VERIFY_TOKEN=dev_verify_123
-      - WHATSAPP_API_VERSION=v18.0
+      - IA_ENABLED=${IA_ENABLED:-true}
+      - WHATSAPP_ENABLED=${WHATSAPP_ENABLED:-false}
+      - WHATSAPP_PHONE_ID=${WHATSAPP_PHONE_ID:-}
+      - WHATSAPP_ACCESS_TOKEN=${WHATSAPP_ACCESS_TOKEN:-}
+      - WHATSAPP_VERIFY_TOKEN=${WHATSAPP_VERIFY_TOKEN:-dev_verify_123}
+      - WHATSAPP_API_VERSION=${WHATSAPP_API_VERSION:-v18.0}
+      - MAX_CLIENTS=${MAX_CLIENTS:-3}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
+      - BASE_URL=${BASE_URL:-http://localhost:8080}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
     ports:
       - "8080:8080"
     depends_on:
       mariadb:
-        condition: service_started
+        condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
       ia-service:
         condition: service_healthy
     volumes:
@@ -100,8 +145,9 @@ services:
       - ./frontend-react:/app
       - /app/node_modules
     environment:
-      - REACT_APP_API_URL=http://localhost:8080
-      - WDS_SOCKET_PORT=3000
+      - REACT_APP_API_URL=${BASE_URL:-http://localhost:8080}/api/v1
+      - REACT_APP_WS_URL=ws://localhost:8080
+      - WDS_SOCKET_PORT=8080
     networks:
       - saas-network
     restart: unless-stopped
@@ -123,5 +169,5 @@ networks:
     driver: bridge
 
 volumes:
-  mariadb_data:
+  saas-mariadb:
   redis_data:

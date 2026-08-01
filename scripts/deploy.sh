@@ -1,30 +1,33 @@
 #!/bin/bash
 set -e
 
-# Cores para output
+# Cores
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m'
 
-echo -e "${GREEN}🚀 Iniciando deploy em produção...${NC}"
+echo -e "${BLUE}========================================${NC}"
+echo -e "${BLUE}🚀 SaaS Atendimento - Deploy${NC}"
+echo -e "${BLUE}========================================${NC}"
 
-# Verificar variáveis de ambiente
-if [ ! -f .env.prod ]; then
-    echo -e "${RED}❌ Arquivo .env.prod não encontrado!${NC}"
+# Verificar .env.production
+if [ ! -f .env.production ]; then
+    echo -e "${RED}❌ Arquivo .env.production não encontrado!${NC}"
     exit 1
 fi
 
 # Carregar variáveis
-export $(cat .env.prod | grep -v '#' | xargs)
+export $(cat .env.production | grep -v '^#' | xargs)
 
 # Backup do banco
 echo -e "${YELLOW}📦 Realizando backup do banco...${NC}"
-docker exec saas-mariadb-prod mysqldump -u${DB_USER} -p${DB_PASSWORD} ${DB_NAME} > backups/backup_$(date +%Y%m%d_%H%M%S).sql
+./scripts/backup.sh
 
 # Build das imagens
 echo -e "${YELLOW}🏗️  Buildando imagens...${NC}"
-docker-compose -f docker-compose.prod.yml build
+docker-compose -f docker-compose.prod.yml build --parallel
 
 # Parar serviços antigos
 echo -e "${YELLOW}🛑 Parando serviços antigos...${NC}"
@@ -36,23 +39,16 @@ docker-compose -f docker-compose.prod.yml up -d
 
 # Aguardar inicialização
 echo -e "${YELLOW}⏳ Aguardando serviços iniciarem...${NC}"
-sleep 10
+sleep 15
 
 # Verificar saúde
 echo -e "${YELLOW}🔍 Verificando saúde dos serviços...${NC}"
-for service in backend-go ia-service; do
-    if docker ps --filter "name=saas-$service-prod" --filter "status=running" | grep -q .; then
-        echo -e "${GREEN}✅ $service está rodando${NC}"
-    else
-        echo -e "${RED}❌ $service não está rodando!${NC}"
-        docker logs saas-$service-prod --tail 50
-        exit 1
-    fi
-done
+./scripts/health-check.sh
 
-# Testar API
-echo -e "${YELLOW}🧪 Testando API...${NC}"
-curl -s http://localhost:8080/health | grep -q "ok" && echo -e "${GREEN}✅ API está respondendo${NC}" || echo -e "${RED}❌ API não respondeu${NC}"
-
+# Mostrar status
+echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}✅ Deploy concluído com sucesso!${NC}"
-echo -e "${GREEN}📍 Acesse: ${BASE_URL}${NC}"
+echo -e "${GREEN}📍 Acesse: https://${DOMAIN}${NC}"
+echo -e "${GREEN}📊 Grafana: https://${DOMAIN}/grafana${NC}"
+echo -e "${GREEN}📈 Prometheus: http://localhost:9090${NC}"
+echo -e "${GREEN}========================================${NC}"

@@ -4,8 +4,11 @@ import Layout from './components/Layout';
 import PrivateRoute from './components/PrivateRoute';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
-import UserManagement from './pages/UserManagement';
 import Atendimento from './pages/Atendimento';
+import UserManagement from './pages/UserManagement';
+import Produtos from './pages/Produtos';
+import Orcamentos from './pages/Orcamentos';
+import Reclamacoes from './pages/Reclamacoes';
 import './App.css';
 
 function App() {
@@ -14,7 +17,6 @@ function App() {
       <Routes>
         <Route path="/login" element={<Login />} />
         
-        {/* Rotas protegidas com Layout */}
         <Route path="/" element={
           <PrivateRoute>
             <Layout>
@@ -35,6 +37,30 @@ function App() {
           <PrivateRoute>
             <Layout>
               <Atendimento />
+            </Layout>
+          </PrivateRoute>
+        } />
+        
+        <Route path="/produtos" element={
+          <PrivateRoute allowedRoles={['admin', 'gerente']}>
+            <Layout>
+              <Produtos />
+            </Layout>
+          </PrivateRoute>
+        } />
+        
+        <Route path="/orcamentos" element={
+          <PrivateRoute allowedRoles={['admin', 'gerente']}>
+            <Layout>
+              <Orcamentos />
+            </Layout>
+          </PrivateRoute>
+        } />
+        
+        <Route path="/reclamacoes" element={
+          <PrivateRoute allowedRoles={['admin', 'gerente']}>
+            <Layout>
+              <Reclamacoes />
             </Layout>
           </PrivateRoute>
         } />

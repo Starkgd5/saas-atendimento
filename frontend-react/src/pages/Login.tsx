@@ -1,121 +1,117 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-
-interface LoginResponse {
-  token: string;
-  user: {
-    id: number;
-    nome: string;
-    email: string;
-    role: string;
-  };
-}
+import { useNavigate, useLocation } from 'react-router-dom';
+import Button from '../components/ui/Button';
+import Input from '../components/ui/Input';
+import { useAuth } from '../hooks/useAuth';
+import { useToast } from '../hooks/useToast';
 
 const Login: React.FC = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const { login } = useAuth();
+  const { success, error: showError } = useToast();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Removido 'from' não utilizado
+  // const from = (location.state as any)?.from?.pathname || '/dashboard';
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    setError('');
 
     try {
-      const response = await fetch('/api/v1/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-      });
-
-      const data: LoginResponse = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || 'Erro no login');
-      }
-
-      // Salvar token e dados do usuário
-      localStorage.setItem('token', data.token);
-      localStorage.setItem('user', JSON.stringify(data.user));
-
-      // Redirecionar baseado no role
-      if (data.user.role === 'admin' || data.user.role === 'gerente') {
+      const response = await login(email, password);
+      success('Login realizado com sucesso!');
+      
+      if (response.user.role === 'admin' || response.user.role === 'gerente') {
         navigate('/dashboard');
       } else {
         navigate('/atendimento');
       }
     } catch (err: any) {
-      setError(err.message || 'Erro ao fazer login');
+      showError(err.message || 'Erro ao fazer login');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">
-      <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md">
-        {/* Logo e título */}
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 p-4">
+      <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md border border-gray-100">
+        {/* Logo */}
         <div className="text-center mb-8">
-          <div className="text-5xl mb-4">💊</div>
-          <h1 className="text-3xl font-bold text-gray-800">SaaS Atendimento</h1>
-          <p className="text-gray-500 mt-2">Sistema de atendimento com IA</p>
+          <div className="text-5xl mb-3">💊</div>
+          <h1 className="text-2xl font-bold text-gray-800">
+            {process.env.REACT_APP_NAME || 'SaaS Atendimento'}
+          </h1>
+          <p className="text-gray-500 mt-1 text-sm">
+            Sistema de atendimento com IA
+          </p>
+          <p className="text-xs text-gray-400 mt-2">
+            v{process.env.REACT_APP_VERSION || '2.0.0'}
+          </p>
         </div>
 
         {/* Formulário */}
         <form onSubmit={handleLogin}>
           <div className="mb-4">
-            <label className="block text-gray-700 text-sm font-semibold mb-2">
-              E-mail
-            </label>
-            <input
+            <Input
               type="email"
+              label="E-mail"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
               placeholder="admin@saas.com"
               required
+              autoFocus
+              icon="📧"
             />
           </div>
 
           <div className="mb-6">
-            <label className="block text-gray-700 text-sm font-semibold mb-2">
-              Senha
-            </label>
-            <input
+            <Input
               type="password"
+              label="Senha"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
               placeholder="••••••••"
               required
+              icon="🔒"
             />
           </div>
 
-          {error && (
-            <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-xl text-sm">
-              ❌ {error}
-            </div>
-          )}
-
-          <button
+          <Button
             type="submit"
-            disabled={loading}
-            className={`w-full py-3 rounded-xl font-semibold text-white transition ${
-              loading 
-                ? 'bg-blue-400 cursor-not-allowed' 
-                : 'bg-blue-600 hover:bg-blue-700 active:scale-95'
-            }`}
+            loading={loading}
+            fullWidth
+            size="lg"
+            icon="🔑"
           >
-            {loading ? 'Entrando...' : '🔑 Entrar'}
-          </button>
+            Entrar
+          </Button>
         </form>
 
-        {/* Versão/demo */}
-        <div className="mt-6 text-center text-sm text-gray-400">
-          <p>Demo: admin@saas.com / admin123</p>
-          <p className="mt-1">Atendente: atendente@saas.com / atendente123</p>
+        {/* Credenciais de demonstração */}
+        <div className="mt-6 pt-6 border-t border-gray-100">
+          <p className="text-center text-xs text-gray-400 mb-3">Credenciais de demonstração</p>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="p-2 bg-gray-50 rounded-lg">
+              <span className="font-medium text-gray-700">Admin</span>
+              <p className="text-gray-400">admin@saas.com</p>
+              <p className="text-gray-400">admin123</p>
+            </div>
+            <div className="p-2 bg-gray-50 rounded-lg">
+              <span className="font-medium text-gray-700">Gerente</span>
+              <p className="text-gray-400">gerente@saas.com</p>
+              <p className="text-gray-400">gerente123</p>
+            </div>
+            <div className="p-2 bg-gray-50 rounded-lg col-span-2">
+              <span className="font-medium text-gray-700">Atendente</span>
+              <p className="text-gray-400">atendente@saas.com</p>
+              <p className="text-gray-400">atendente123</p>
+            </div>
+          </div>
         </div>
       </div>
     </div>
