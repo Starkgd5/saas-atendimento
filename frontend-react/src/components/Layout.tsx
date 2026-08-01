@@ -28,26 +28,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
-    const userStr = localStorage.getItem('user');
-    if (userStr) {
-      try {
-        setUser(JSON.parse(userStr));
-      } catch {
-        setUser(null);
-      }
-    }
-    setIsLoading(false);
-  }, []);
-
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
-    navigate('/login');
-  };
-
-  // Menu items com roles
-  const allMenuItems: MenuItem[] = [
+  // Menu items com roles (definido fora do componente para evitar recriação)
+  const allMenuItems: MenuItem[] = useMemo(() => [
     { path: '/dashboard', icon: '📊', label: 'Dashboard' },
     { path: '/atendimento', icon: '💬', label: 'Atendimento' },
     { 
@@ -86,7 +68,25 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       label: 'Configurações',
       roles: ['admin'] 
     },
-  ];
+  ], []);
+
+  useEffect(() => {
+    const userStr = localStorage.getItem('user');
+    if (userStr) {
+      try {
+        setUser(JSON.parse(userStr));
+      } catch {
+        setUser(null);
+      }
+    }
+    setIsLoading(false);
+  }, []);
+
+  const handleLogout = () => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    navigate('/login');
+  };
 
   // Filtrar itens baseado no role do usuário
   const menuItems = useMemo(() => {
@@ -96,7 +96,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       if (!item.roles) return true;
       return item.roles.includes(user.role);
     });
-  }, [user]);
+  }, [user, allMenuItems]);
 
   const getPageTitle = () => {
     const currentItem = menuItems.find(item => isActive(item.path));
@@ -108,7 +108,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     return location.pathname === path || location.pathname.startsWith(path + '/');
   };
 
-  // Verificar se o usuário tem permissão para acessar a rota atual
+  // Verificar permissão da rota atual
   const hasPermission = useMemo(() => {
     const currentPath = location.pathname;
     const menuItem = allMenuItems.find(item => 
@@ -119,7 +119,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     if (!user) return false;
     
     return menuItem.roles.includes(user.role);
-  }, [location.pathname, user]);
+  }, [location.pathname, user, allMenuItems]);
 
   // Redirecionar se não tiver permissão
   useEffect(() => {

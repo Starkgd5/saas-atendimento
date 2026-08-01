@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
 import { useAuth } from '../hooks/useAuth';
@@ -12,10 +12,6 @@ const Login: React.FC = () => {
   const { login } = useAuth();
   const { success, error: showError } = useToast();
   const navigate = useNavigate();
-  const location = useLocation();
-
-  // Removido 'from' não utilizado
-  // const from = (location.state as any)?.from?.pathname || '/dashboard';
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();

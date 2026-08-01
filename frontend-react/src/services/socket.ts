@@ -325,7 +325,7 @@ class SocketService {
   // ============================================
 
   isConnectedToServer(): boolean {
-    return this.isConnected && this.socket?.connected || false;
+    return (this.isConnected && this.socket?.connected) || false;
   }
 
   getSocketId(): string | null {

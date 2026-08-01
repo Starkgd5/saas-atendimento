@@ -407,8 +407,9 @@ func setupRouter() *gin.Engine {
 		auth := api.Group("/")
 		auth.Use(authMiddleware())
 		{
+			// Dashboard
 			auth.GET("/dashboard", getDashboard)
-			auth.GET("/dashboard/metricas", getMetricasAtendimento)
+			auth.GET("/dashboard/metricas", getMetricasDetalhadas)
 			auth.GET("/fila/status", getFilaStatus)
 			auth.GET("/fila/clientes", getFilaClientes)
 			auth.POST("/fila/proximo", puxarProximoCliente)
@@ -619,28 +620,119 @@ func registerUser(c *gin.Context) {
 // ============ DASHBOARD ============
 
 func getDashboard(c *gin.Context) {
+	// Pegar lojaID do contexto
 	lojaID, exists := c.Get("lojaID")
 	if !exists {
 		lojaID = 1
 	}
+
 	ctx := context.Background()
 
+	// Verificar se o banco está conectado
+	if db == nil {
+		zap.L().Error("Banco de dados não está conectado")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Banco de dados não disponível"})
+		return
+	}
+
+	// Buscar métricas
 	metrics, err := dashboardService.GetMetrics(ctx, lojaID.(int))
+	if err != nil {
+		zap.L().Error("Erro ao buscar métricas", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Buscar status da fila
+	filaStatus, err := filaService.GetStatusFila(ctx)
+	if err != nil {
+		zap.L().Warn("Erro ao buscar status da fila", zap.Error(err))
+		// Não falha a requisição, apenas não inclui a fila
+		c.JSON(http.StatusOK, gin.H{
+			"metrics": metrics,
+		})
+		return
+	}
+
+	// Buscar métricas adicionais
+	metricasDiarias, err := dashboardService.GetMetricasDiarias(ctx, lojaID.(int), 7)
+	if err != nil {
+		zap.L().Warn("Erro ao buscar métricas diárias", zap.Error(err))
+		metricasDiarias = []map[string]interface{}{}
+	}
+
+	satisfacao, err := dashboardService.GetSatisfacaoCliente(ctx, lojaID.(int))
+	if err != nil {
+		zap.L().Warn("Erro ao buscar satisfação", zap.Error(err))
+		satisfacao = map[string]interface{}{
+			"total_reclamacoes": 0,
+			"resolvidas":        0,
+			"taxa_resolucao":    0,
+			"score":             100,
+		}
+	}
+
+	crescimento, err := dashboardService.GetCrescimentoMensal(ctx, lojaID.(int))
+	if err != nil {
+		zap.L().Warn("Erro ao buscar crescimento", zap.Error(err))
+		crescimento = 0
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"metrics":          metrics,
+		"fila":             filaStatus,
+		"metricas_diarias": metricasDiarias,
+		"satisfacao":       satisfacao,
+		"crescimento":      crescimento,
+		"timestamp":        time.Now().Format(time.RFC3339),
+	})
+}
+
+// ============ HANDLER PARA MÉTRICAS DETALHADAS ============
+
+func getMetricasDetalhadas(c *gin.Context) {
+	lojaID, exists := c.Get("lojaID")
+	if !exists {
+		lojaID = 1
+	}
+
+	ctx := context.Background()
+
+	// Buscar métricas por hora
+	metricasPorHora, err := dashboardService.GetMetricasPorHora(ctx, lojaID.(int))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	filaStatus, err := filaService.GetStatusFila(ctx)
-	if err == nil {
-		c.JSON(http.StatusOK, gin.H{
-			"metrics": metrics,
-			"fila":    filaStatus,
-		})
+	// Buscar métricas diárias (30 dias)
+	metricasDiarias, err := dashboardService.GetMetricasDiarias(ctx, lojaID.(int), 30)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, metrics)
+	// Buscar satisfação
+	satisfacao, err := dashboardService.GetSatisfacaoCliente(ctx, lojaID.(int))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Buscar relatório completo
+	relatorio, err := dashboardService.GetRelatorioCompleto(ctx, lojaID.(int), "mensal")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"metricas_por_hora": metricasPorHora,
+		"metricas_diarias":  metricasDiarias,
+		"satisfacao":        satisfacao,
+		"relatorio":         relatorio,
+		"timestamp":         time.Now().Format(time.RFC3339),
+	})
 }
 
 // ============ FILA ============

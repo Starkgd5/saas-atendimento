@@ -1,6 +1,16 @@
 import { useState, useCallback } from 'react';
 import ApiService from '../services/api.service';
-import AuthService from '../services/auth.service';
+
+type ApiRequestOptions = {
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
+  headers?: Record<string, string>;
+  body?: any;
+  requireAuth?: boolean;
+};
+
+type ApiRequestService = {
+  request: <T = any>(endpoint: string, options: ApiRequestOptions) => Promise<T>;
+};
 
 export const useApi = () => {
   const [loading, setLoading] = useState(false);
@@ -19,17 +29,8 @@ export const useApi = () => {
     setError(null);
 
     try {
-      const result = await (ApiService as unknown as {
-        request<T = any>(
-          endpoint: string,
-          options: {
-            method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
-            headers?: Record<string, string>;
-            body?: any;
-            requireAuth?: boolean;
-          }
-        ): Promise<T>;
-      }).request<T>(endpoint, options);
+      const apiService = ApiService as unknown as ApiRequestService;
+      const result = await apiService.request<T>(endpoint, options);
       return result;
     } catch (err: any) {
       setError(err.message || 'Erro na requisição');

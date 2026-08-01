@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
 import Modal from '../components/ui/Modal';
@@ -30,7 +29,6 @@ const UserManagement: React.FC = () => {
     role: 'atendente',
     loja_id: ''
   });
-  // const navigate = useNavigate();
   const { get, post, put, patch, delete: del } = useApi();
   const { success, error: showError } = useToast();
 

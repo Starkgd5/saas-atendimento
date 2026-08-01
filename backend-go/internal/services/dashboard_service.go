@@ -121,7 +121,7 @@ func (s *DashboardService) GetMetrics(ctx context.Context, lojaID int) (*models.
 func (s *DashboardService) GetTotalClientes(ctx context.Context, lojaID int) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM clientes WHERE loja_id = ?
+		SELECT COALESCE(COUNT(*), 0) FROM clientes WHERE loja_id = ?
 	`, lojaID).Scan(&count)
 	return count, err
 }
@@ -130,7 +130,7 @@ func (s *DashboardService) GetTotalClientes(ctx context.Context, lojaID int) (in
 func (s *DashboardService) GetAtendimentosHoje(ctx context.Context, lojaID int) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM atendimentos 
+		SELECT COALESCE(COUNT(*), 0) FROM atendimentos 
 		WHERE loja_id = ? AND DATE(iniciado_em) = CURDATE()
 	`, lojaID).Scan(&count)
 	return count, err
@@ -140,7 +140,7 @@ func (s *DashboardService) GetAtendimentosHoje(ctx context.Context, lojaID int) 
 func (s *DashboardService) GetAtendimentosMes(ctx context.Context, lojaID int) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM atendimentos 
+		SELECT COALESCE(COUNT(*), 0) FROM atendimentos 
 		WHERE loja_id = ? AND MONTH(iniciado_em) = MONTH(CURDATE()) 
 		AND YEAR(iniciado_em) = YEAR(CURDATE())
 	`, lojaID).Scan(&count)
@@ -149,31 +149,43 @@ func (s *DashboardService) GetAtendimentosMes(ctx context.Context, lojaID int) (
 
 // GetTicketMedio retorna o ticket médio
 func (s *DashboardService) GetTicketMedio(ctx context.Context, lojaID int) (float64, error) {
-	var avg float64
+	var avg sql.NullFloat64
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COALESCE(AVG(total), 0) FROM orcamentos 
-		WHERE loja_id = ? AND status = ?
+		WHERE loja_id = ? AND status = ? AND total > 0
 	`, lojaID, models.OrcamentoAprovado).Scan(&avg)
-	return avg, err
+	if err != nil {
+		return 0, err
+	}
+	if !avg.Valid {
+		return 0, nil
+	}
+	return avg.Float64, nil
 }
 
 // GetTaxaConversao retorna a taxa de conversão (orçamentos aprovados / total)
 func (s *DashboardService) GetTaxaConversao(ctx context.Context, lojaID int) (float64, error) {
-	var taxa float64
+	var taxa sql.NullFloat64
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COALESCE(
 			(SELECT COUNT(*) FROM orcamentos WHERE loja_id = ? AND status = ?) * 100.0 / 
-			NULLIF((SELECT COUNT(*) FROM orcamentos WHERE loja_id = ?), 0), 0
+			NULLIF((SELECT COALESCE(COUNT(*), 1) FROM orcamentos WHERE loja_id = ?), 0), 0
 		)
 	`, lojaID, models.OrcamentoAprovado, lojaID).Scan(&taxa)
-	return taxa, err
+	if err != nil {
+		return 0, err
+	}
+	if !taxa.Valid {
+		return 0, nil
+	}
+	return taxa.Float64, nil
 }
 
 // GetOrcamentosHoje retorna o total de orçamentos gerados hoje
 func (s *DashboardService) GetOrcamentosHoje(ctx context.Context, lojaID int) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM orcamentos 
+		SELECT COALESCE(COUNT(*), 0) FROM orcamentos 
 		WHERE loja_id = ? AND DATE(created_at) = CURDATE()
 	`, lojaID).Scan(&count)
 	return count, err
@@ -181,11 +193,11 @@ func (s *DashboardService) GetOrcamentosHoje(ctx context.Context, lojaID int) (i
 
 // GetTempoMedioEspera retorna o tempo médio de espera em segundos
 func (s *DashboardService) GetTempoMedioEspera(ctx context.Context, lojaID int) (int, error) {
-	var avg sql.NullInt64
+	var avg sql.NullFloat64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT AVG(tempo_espera)
+		SELECT COALESCE(AVG(tempo_espera), 0)
 		FROM atendimentos
-		WHERE loja_id = ? AND tempo_espera IS NOT NULL
+		WHERE loja_id = ? AND tempo_espera IS NOT NULL AND tempo_espera > 0
 	`, lojaID).Scan(&avg)
 	if err != nil {
 		return 0, err
@@ -193,14 +205,14 @@ func (s *DashboardService) GetTempoMedioEspera(ctx context.Context, lojaID int) 
 	if !avg.Valid {
 		return 0, nil
 	}
-	return int(avg.Int64), nil
+	return int(avg.Float64), nil
 }
 
 // GetTempoMedioAtendimento retorna o tempo médio de atendimento em segundos
 func (s *DashboardService) GetTempoMedioAtendimento(ctx context.Context, lojaID int) (float64, error) {
 	var avg sql.NullFloat64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT AVG(TIMESTAMPDIFF(SECOND, iniciado_em, finalizado_em))
+		SELECT COALESCE(AVG(TIMESTAMPDIFF(SECOND, iniciado_em, finalizado_em)), 0)
 		FROM atendimentos
 		WHERE loja_id = ? AND status = ? AND finalizado_em IS NOT NULL
 	`, lojaID, models.StatusFinalizado).Scan(&avg)
@@ -215,7 +227,7 @@ func (s *DashboardService) GetTempoMedioAtendimento(ctx context.Context, lojaID 
 
 // GetHorarioPico retorna o horário de pico de atendimentos
 func (s *DashboardService) GetHorarioPico(ctx context.Context, lojaID int) (string, error) {
-	var horario string
+	var horario sql.NullString
 	err := s.db.QueryRowContext(ctx, `
 		SELECT CONCAT(
 			LPAD(HOUR(iniciado_em), 2, '0'), ':00 - ',
@@ -227,10 +239,16 @@ func (s *DashboardService) GetHorarioPico(ctx context.Context, lojaID int) (stri
 		ORDER BY COUNT(*) DESC
 		LIMIT 1
 	`, lojaID).Scan(&horario)
-	if err == sql.ErrNoRows {
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "N/A", nil
+		}
+		return "N/A", err
+	}
+	if !horario.Valid {
 		return "N/A", nil
 	}
-	return horario, err
+	return horario.String, nil
 }
 
 // GetProdutosMaisVendidos retorna os produtos mais vendidos
@@ -241,12 +259,12 @@ func (s *DashboardService) GetProdutosMaisVendidos(ctx context.Context, lojaID i
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT 
-			p.nome as produto_nome,
-			SUM(oi.quantidade) as total_quantidade,
-			SUM(oi.total) as total_vendido
+			COALESCE(p.nome, 'Produto não identificado') as produto_nome,
+			COALESCE(SUM(oi.quantidade), 0) as total_quantidade,
+			COALESCE(SUM(oi.total), 0) as total_vendido
 		FROM orcamento_itens oi
 		JOIN orcamentos o ON oi.orcamento_id = o.id
-		JOIN produtos p ON oi.produto_id = p.id
+		LEFT JOIN produtos p ON oi.produto_id = p.id
 		WHERE o.loja_id = ? AND o.status = ?
 		GROUP BY p.id, p.nome
 		ORDER BY total_quantidade DESC
@@ -274,9 +292,9 @@ func (s *DashboardService) GetProdutosMaisVendidos(ctx context.Context, lojaID i
 func (s *DashboardService) GetReclamacoesPendentes(ctx context.Context, lojaID int) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM reclamacoes 
-		WHERE loja_id = ? AND status = ?
-	`, lojaID, models.ReclamacaoPendente).Scan(&count)
+		SELECT COALESCE(COUNT(*), 0) FROM reclamacoes 
+		WHERE loja_id = ? AND status IN (?, ?)
+	`, lojaID, models.ReclamacaoPendente, models.ReclamacaoEmAnalise).Scan(&count)
 	return count, err
 }
 
@@ -284,7 +302,7 @@ func (s *DashboardService) GetReclamacoesPendentes(ctx context.Context, lojaID i
 func (s *DashboardService) GetTotalFinalizados(ctx context.Context, lojaID int) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM atendimentos 
+		SELECT COALESCE(COUNT(*), 0) FROM atendimentos 
 		WHERE loja_id = ? AND status = ?
 	`, lojaID, models.StatusFinalizado).Scan(&count)
 	return count, err
@@ -294,14 +312,14 @@ func (s *DashboardService) GetTotalFinalizados(ctx context.Context, lojaID int) 
 func (s *DashboardService) GetAbandonos(ctx context.Context, lojaID int) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM atendimentos 
+		SELECT COALESCE(COUNT(*), 0) FROM atendimentos 
 		WHERE loja_id = ? AND status = ?
 	`, lojaID, models.StatusAbandonado).Scan(&count)
 	return count, err
 }
 
 // ============================================
-// MÉTRICAS AVANÇADAS
+// MÉTRICAS DIÁRIAS
 // ============================================
 
 // GetMetricasDiarias retorna métricas diárias para gráficos
@@ -316,7 +334,7 @@ func (s *DashboardService) GetMetricasDiarias(ctx context.Context, lojaID int, d
 			COUNT(*) as total,
 			SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as finalizados,
 			SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as abandonados,
-			AVG(TIMESTAMPDIFF(SECOND, iniciado_em, finalizado_em)) as tempo_medio
+			COALESCE(AVG(TIMESTAMPDIFF(SECOND, iniciado_em, finalizado_em)), 0) as tempo_medio
 		FROM atendimentos
 		WHERE loja_id = ? AND iniciado_em >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
 		GROUP BY DATE(iniciado_em)
@@ -329,8 +347,9 @@ func (s *DashboardService) GetMetricasDiarias(ctx context.Context, lojaID int, d
 		lojaID,
 		dias,
 	)
+
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("erro ao buscar métricas diárias: %w", err)
 	}
 	defer rows.Close()
 
@@ -338,27 +357,78 @@ func (s *DashboardService) GetMetricasDiarias(ctx context.Context, lojaID int, d
 	for rows.Next() {
 		var data string
 		var total, finalizados, abandonados int
-		var tempoMedio sql.NullFloat64
+		var tempoMedio float64
 
 		if err := rows.Scan(&data, &total, &finalizados, &abandonados, &tempoMedio); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("erro ao scanear métricas diárias: %w", err)
 		}
 
-		resultado := map[string]interface{}{
-			"data":          data,
-			"total":         total,
-			"finalizados":   finalizados,
-			"abandonados":   abandonados,
-			"taxa_sucesso":  float64(finalizados) / float64(total+1) * 100,
+		taxaSucesso := 0.0
+		if total > 0 {
+			taxaSucesso = float64(finalizados) / float64(total) * 100
 		}
-		if tempoMedio.Valid {
-			resultado["tempo_medio"] = tempoMedio.Float64
-		}
-		resultados = append(resultados, resultado)
+
+		resultados = append(resultados, map[string]interface{}{
+			"data":         data,
+			"total":        total,
+			"finalizados":  finalizados,
+			"abandonados":  abandonados,
+			"tempo_medio":  tempoMedio,
+			"taxa_sucesso": taxaSucesso,
+		})
 	}
 
 	return resultados, nil
 }
+
+// ============================================
+// SATISFAÇÃO DO CLIENTE
+// ============================================
+
+// GetSatisfacaoCliente retorna métricas de satisfação baseado em reclamações
+func (s *DashboardService) GetSatisfacaoCliente(ctx context.Context, lojaID int) (map[string]interface{}, error) {
+	var totalReclamacoes, resolvidas int
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT 
+			COALESCE(COUNT(*), 0) as total,
+			COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0) as resolvidas
+		FROM reclamacoes
+		WHERE loja_id = ?
+	`, models.ReclamacaoResolvido, lojaID).Scan(&totalReclamacoes, &resolvidas)
+
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar satisfação do cliente: %w", err)
+	}
+
+	taxaResolucao := 0.0
+	if totalReclamacoes > 0 {
+		taxaResolucao = float64(resolvidas) / float64(totalReclamacoes) * 100
+	}
+
+	// Calcular score de satisfação (0-100)
+	// Base: quanto menor o número de reclamações não resolvidas, maior o score
+	naoResolvidas := totalReclamacoes - resolvidas
+	score := 100.0
+	if totalReclamacoes > 0 {
+		score = 100 - (float64(naoResolvidas) / float64(totalReclamacoes) * 50)
+	}
+	if score < 0 {
+		score = 0
+	}
+
+	return map[string]interface{}{
+		"total_reclamacoes": totalReclamacoes,
+		"resolvidas":        resolvidas,
+		"nao_resolvidas":    naoResolvidas,
+		"taxa_resolucao":    taxaResolucao,
+		"score":             score,
+	}, nil
+}
+
+// ============================================
+// MÉTRICAS POR HORA
+// ============================================
 
 // GetMetricasPorHora retorna métricas por hora do dia
 func (s *DashboardService) GetMetricasPorHora(ctx context.Context, lojaID int) ([]map[string]interface{}, error) {
@@ -375,7 +445,7 @@ func (s *DashboardService) GetMetricasPorHora(ctx context.Context, lojaID int) (
 
 	rows, err := s.db.QueryContext(ctx, query, models.StatusFinalizado, lojaID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("erro ao buscar métricas por hora: %w", err)
 	}
 	defer rows.Close()
 
@@ -384,87 +454,102 @@ func (s *DashboardService) GetMetricasPorHora(ctx context.Context, lojaID int) (
 		var hora, total, finalizados int
 
 		if err := rows.Scan(&hora, &total, &finalizados); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("erro ao scanear métricas por hora: %w", err)
 		}
 
 		resultados = append(resultados, map[string]interface{}{
 			"hora":        hora,
 			"total":       total,
 			"finalizados": finalizados,
+			"taxa_sucesso": func() float64 {
+				if total > 0 {
+					return float64(finalizados) / float64(total) * 100
+				}
+				return 0
+			}(),
 		})
 	}
 
 	return resultados, nil
 }
 
-// GetSatisfacaoCliente retorna métricas de satisfação (baseado em reclamações)
-func (s *DashboardService) GetSatisfacaoCliente(ctx context.Context, lojaID int) (map[string]interface{}, error) {
-	var totalReclamacoes, resolvidas int
+// ============================================
+// MÉTRICAS DE CRESCIMENTO
+// ============================================
+
+// GetCrescimentoMensal retorna o crescimento percentual mês a mês
+func (s *DashboardService) GetCrescimentoMensal(ctx context.Context, lojaID int) (float64, error) {
+	var crescimento sql.NullFloat64
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT 
-			COUNT(*) as total,
-			SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as resolvidas
-		FROM reclamacoes
-		WHERE loja_id = ?
-	`, lojaID, models.ReclamacaoResolvido).Scan(&totalReclamacoes, &resolvidas)
+			COALESCE(
+				(
+					SELECT COUNT(*) FROM atendimentos 
+					WHERE loja_id = ? 
+					AND MONTH(iniciado_em) = MONTH(CURDATE()) 
+					AND YEAR(iniciado_em) = YEAR(CURDATE())
+				) * 100.0 / 
+				NULLIF(
+					(
+						SELECT COUNT(*) FROM atendimentos 
+						WHERE loja_id = ? 
+						AND MONTH(iniciado_em) = MONTH(DATE_SUB(CURDATE(), INTERVAL 1 MONTH)) 
+						AND YEAR(iniciado_em) = YEAR(DATE_SUB(CURDATE(), INTERVAL 1 MONTH))
+					), 0
+				) - 100,
+				0
+			) as crescimento
+	`, lojaID, lojaID).Scan(&crescimento)
 
 	if err != nil {
-		return nil, err
+		if err == sql.ErrNoRows {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("erro ao calcular crescimento: %w", err)
 	}
 
-	taxaResolucao := 0.0
-	if totalReclamacoes > 0 {
-		taxaResolucao = float64(resolvidas) / float64(totalReclamacoes) * 100
+	if !crescimento.Valid {
+		return 0, nil
 	}
 
-	return map[string]interface{}{
-		"total_reclamacoes": totalReclamacoes,
-		"resolvidas":        resolvidas,
-		"taxa_resolucao":    taxaResolucao,
-		"score":             100 - (float64(totalReclamacoes-resolvidas) / float64(totalReclamacoes+1) * 10),
-	}, nil
+	return crescimento.Float64, nil
 }
 
 // ============================================
-// RELATÓRIOS
+// RELATÓRIO COMPLETO
 // ============================================
 
 // GetRelatorioCompleto retorna um relatório completo com todas as métricas
 func (s *DashboardService) GetRelatorioCompleto(ctx context.Context, lojaID int, periodo string) (map[string]interface{}, error) {
+	// Buscar métricas principais
 	metrics, err := s.GetMetrics(ctx, lojaID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("erro ao buscar métricas: %w", err)
 	}
 
-	metricasDiarias, err := s.GetMetricasDiarias(ctx, lojaID, 7)
+	// Buscar métricas diárias
+	metricasDiarias, err := s.GetMetricasDiarias(ctx, lojaID, 30)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("erro ao buscar métricas diárias: %w", err)
 	}
 
+	// Buscar métricas por hora
 	metricasPorHora, err := s.GetMetricasPorHora(ctx, lojaID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("erro ao buscar métricas por hora: %w", err)
 	}
 
+	// Buscar satisfação
 	satisfacao, err := s.GetSatisfacaoCliente(ctx, lojaID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("erro ao buscar satisfação: %w", err)
 	}
 
-	// Calcular crescimento
-	var crescimento float64
-	err = s.db.QueryRowContext(ctx, `
-		SELECT 
-			COALESCE(
-				(SELECT COUNT(*) FROM atendimentos WHERE loja_id = ? AND MONTH(iniciado_em) = MONTH(CURDATE()) AND YEAR(iniciado_em) = YEAR(CURDATE())) /
-				NULLIF((SELECT COUNT(*) FROM atendimentos WHERE loja_id = ? AND MONTH(iniciado_em) = MONTH(DATE_SUB(CURDATE(), INTERVAL 1 MONTH)) AND YEAR(iniciado_em) = YEAR(DATE_SUB(CURDATE(), INTERVAL 1 MONTH))), 0) * 100 - 100,
-				0
-			)
-	`, lojaID, lojaID).Scan(&crescimento)
-
-	if err != nil && err != sql.ErrNoRows {
-		crescimento = 0
+	// Buscar crescimento
+	crescimento, err := s.GetCrescimentoMensal(ctx, lojaID)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar crescimento: %w", err)
 	}
 
 	return map[string]interface{}{

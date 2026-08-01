@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import { useApi } from '../hooks/useApi';
@@ -29,33 +28,42 @@ interface FilaStatus {
   limite: number;
 }
 
+interface MetricasDiarias {
+  data: string;
+  total: number;
+  finalizados: number;
+  abandonados: number;
+  tempo_medio: number;
+  taxa_sucesso: number;
+}
+
+interface Satisfacao {
+  total_reclamacoes: number;
+  resolvidas: number;
+  taxa_resolucao: number;
+  score: number;
+}
+
+interface DashboardData {
+  metrics: Metric;
+  fila: FilaStatus;
+  metricas_diarias: MetricasDiarias[];
+  satisfacao: Satisfacao;
+  crescimento: number;
+  timestamp: string;
+}
+
 const Dashboard: React.FC = () => {
-  const [metrics, setMetrics] = useState<Metric | null>(null);
-  const [fila, setFila] = useState<FilaStatus | null>(null);
+  const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const { user } = useAuth();
   const { get } = useApi();
-  const { success, error: showError } = useToast();
-  const navigate = useNavigate();
+  const { error: showError } = useToast();
 
   const fetchDashboardData = useCallback(async () => {
     try {
-      const [dashboardData, filaData] = await Promise.all([
-        get('/dashboard'),
-        get('/fila/status')
-      ]);
-
-      if (dashboardData.metrics) {
-        setMetrics(dashboardData.metrics);
-      } else {
-        setMetrics(dashboardData);
-      }
-
-      if (dashboardData.fila) {
-        setFila(dashboardData.fila);
-      } else if (filaData) {
-        setFila(filaData);
-      }
+      const result = await get<DashboardData>('/dashboard');
+      setData(result);
     } catch (error: any) {
       showError(error.message || 'Erro ao carregar dashboard');
     } finally {
@@ -84,6 +92,11 @@ const Dashboard: React.FC = () => {
   const formatCurrency = FormatterService.formatCurrency;
   const formatNumber = FormatterService.formatNumber;
 
+  const metrics = data?.metrics;
+  const fila = data?.fila;
+  const crescimento = data?.crescimento || 0;
+  const satisfacao = data?.satisfacao;
+
   return (
     <div>
       <div className="flex justify-between items-center mb-6">
@@ -92,6 +105,11 @@ const Dashboard: React.FC = () => {
           <p className="text-gray-500 text-sm mt-1">
             Bem-vindo, {user?.nome}! Aqui estão as métricas do sistema.
           </p>
+          {data?.timestamp && (
+            <p className="text-xs text-gray-400 mt-1">
+              Última atualização: {new Date(data.timestamp).toLocaleString('pt-BR')}
+            </p>
+          )}
         </div>
         <Button
           variant="outline"
@@ -110,7 +128,7 @@ const Dashboard: React.FC = () => {
           value={formatNumber(metrics?.total_clientes || 0)}
           icon="👥"
           color="bg-blue-500"
-          change="+12% este mês"
+          change={`+${crescimento.toFixed(1)}% este mês`}
         />
         <MetricCard
           title="Atendimentos Hoje"
@@ -161,6 +179,52 @@ const Dashboard: React.FC = () => {
         />
       </div>
 
+      {/* Terceira linha - Métricas adicionais */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+        <MetricCard
+          title="Atendimentos Finalizados"
+          value={formatNumber(metrics?.total_finalizados || 0)}
+          icon="✅"
+          color="bg-green-600"
+        />
+        <MetricCard
+          title="Atendimentos Abandonados"
+          value={formatNumber(metrics?.abandonos || 0)}
+          icon="🚫"
+          color="bg-red-600"
+        />
+        <MetricCard
+          title="Taxa de Abandono"
+          value={`${formatNumber(metrics?.taxa_abandono || 0, 1)}%`}
+          icon="📉"
+          color="bg-orange-600"
+        />
+      </div>
+
+      {/* Satisfação do Cliente */}
+      {satisfacao && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+          <MetricCard
+            title="Total Reclamações"
+            value={formatNumber(satisfacao.total_reclamacoes)}
+            icon="📋"
+            color="bg-gray-500"
+          />
+          <MetricCard
+            title="Reclamações Resolvidas"
+            value={formatNumber(satisfacao.resolvidas)}
+            icon="✅"
+            color="bg-green-500"
+          />
+          <MetricCard
+            title="Taxa de Resolução"
+            value={`${formatNumber(satisfacao.taxa_resolucao, 1)}%`}
+            icon="⭐"
+            color="bg-yellow-500"
+          />
+        </div>
+      )}
+
       {/* Fila de atendimento */}
       {fila && (
         <Card
@@ -190,7 +254,11 @@ const Dashboard: React.FC = () => {
           {metrics?.produtos_mais_vendidos?.map((produto, index) => (
             <div key={index} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition">
               <div className="flex items-center gap-3">
-                <span className={`text-xl font-bold w-8 ${index === 0 ? 'text-yellow-500' : index === 1 ? 'text-gray-400' : index === 2 ? 'text-amber-600' : 'text-gray-400'}`}>
+                <span className={`text-xl font-bold w-8 ${
+                  index === 0 ? 'text-yellow-500' : 
+                  index === 1 ? 'text-gray-400' : 
+                  index === 2 ? 'text-amber-600' : 'text-gray-400'
+                }`}>
                   #{index + 1}
                 </span>
                 <div>
@@ -206,6 +274,33 @@ const Dashboard: React.FC = () => {
           )}
         </div>
       </Card>
+
+      {/* Métricas diárias (gráfico simplificado) */}
+      {data?.metricas_diarias && data.metricas_diarias.length > 0 && (
+        <Card title="📈 Atendimentos dos Últimos 7 Dias" className="mt-8">
+          <div className="space-y-2">
+            {data.metricas_diarias.slice(0, 7).map((dia) => (
+              <div key={dia.data} className="flex items-center gap-4">
+                <span className="text-sm text-gray-600 w-28">
+                  {new Date(dia.data).toLocaleDateString('pt-BR')}
+                </span>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <div 
+                      className="h-6 bg-blue-500 rounded"
+                      style={{ width: `${Math.min((dia.total / Math.max(...data.metricas_diarias.map(d => d.total))) * 100, 100)}%` }}
+                    />
+                    <span className="text-sm font-medium text-gray-700">{dia.total}</span>
+                  </div>
+                </div>
+                <span className="text-xs text-gray-400">
+                  {dia.taxa_sucesso.toFixed(1)}% sucesso
+                </span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
     </div>
   );
 };
@@ -227,7 +322,9 @@ const MetricCard: React.FC<{
         <p className="text-sm text-gray-500 font-medium">{title}</p>
         <p className="text-2xl font-bold text-gray-800">{value}</p>
         {change && (
-          <p className="text-xs text-gray-400 mt-1">{change}</p>
+          <p className={`text-xs mt-1 ${change.startsWith('+') ? 'text-green-500' : 'text-gray-400'}`}>
+            {change}
+          </p>
         )}
       </div>
     </div>
