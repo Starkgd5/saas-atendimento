@@ -1,0 +1,21 @@
+[project]
+name = "ia-service"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Starkgd5", email = "juniorguitarrahm@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "pyright>=1.1.411",
+    "requests>=2.34.2",
+    "ruff>=0.16.1",
+]
+
+[project.scripts]
+ia-service = "ia_service:main"
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"

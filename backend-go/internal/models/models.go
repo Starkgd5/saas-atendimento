@@ -20,15 +20,75 @@ type Loja struct {
 // CLIENTE
 // ============================================
 
-// Cliente representa um cliente da farmácia
+// Cliente representa um cliente da farmácia (expandido)
 type Cliente struct {
-	ID                int        `json:"id"`
-	LojaID            int        `json:"loja_id"`
-	Nome              string     `json:"nome"`
-	Telefone          string     `json:"telefone"`
-	Email             string     `json:"email,omitempty"`
+	ID                int       `json:"id"`
+	LojaID            int       `json:"loja_id"`
+	Nome              string    `json:"nome"`
+	Telefone          string    `json:"telefone"`
+	Email             string    `json:"email,omitempty"`
+	CPF               string    `json:"cpf,omitempty"`
+	DataNascimento    *time.Time `json:"data_nascimento,omitempty"`
+	Sexo              string    `json:"sexo,omitempty"`
+	Endereco          string    `json:"endereco,omitempty"`
+	Numero            string    `json:"numero,omitempty"`
+	Complemento       string    `json:"complemento,omitempty"`
+	Bairro            string    `json:"bairro,omitempty"`
+	Cidade            string    `json:"cidade,omitempty"`
+	Estado            string    `json:"estado,omitempty"`
+	CEP               string    `json:"cep,omitempty"`
 	UltimoAtendimento *time.Time `json:"ultimo_atendimento,omitempty"`
-	CreatedAt         time.Time  `json:"created_at"`
+	TotalCompras      float64   `json:"total_compras"`
+	QuantidadeCompras int       `json:"quantidade_compras"`
+	UltimaCompra      *time.Time `json:"ultima_compra,omitempty"`
+	Observacao        string    `json:"observacao,omitempty"`
+	Ativo             bool      `json:"ativo"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+// ClienteFidelidade representa dados de fidelidade
+type ClienteFidelidade struct {
+	ID              int       `json:"id"`
+	ClienteID       int       `json:"cliente_id"`
+	LojaID          int       `json:"loja_id"`
+	Pontos          int       `json:"pontos"`
+	PontosAcumulados int      `json:"pontos_acumulados"`
+	PontosUtilizados int      `json:"pontos_utilizados"`
+	Nivel           string    `json:"nivel"` // Bronze, Prata, Ouro, Diamante
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// Caixa representa uma sessão de caixa
+type Caixa struct {
+	ID             int       `json:"id"`
+	LojaID         int       `json:"loja_id"`
+	UsuarioID      int       `json:"usuario_id"`
+	DataAbertura   time.Time `json:"data_abertura"`
+	DataFechamento *time.Time `json:"data_fechamento,omitempty"`
+	SaldoInicial   float64   `json:"saldo_inicial"`
+	SaldoFinal     float64   `json:"saldo_final"`
+	TotalEntradas  float64   `json:"total_entradas"`
+	TotalSaidas    float64   `json:"total_saidas"`
+	Status         string    `json:"status"` // Aberto, Fechado, Cancelado
+	Observacao     string    `json:"observacao,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// MovimentoCaixa representa uma movimentação financeira
+type MovimentoCaixa struct {
+	ID          int       `json:"id"`
+	CaixaID     int       `json:"caixa_id"`
+	LojaID      int       `json:"loja_id"`
+	Tipo        string    `json:"tipo"` // Entrada, Saída
+	Categoria   string    `json:"categoria"` // Venda, Pagamento, Troco, Outro
+	Valor       float64   `json:"valor"`
+	Descricao   string    `json:"descricao"`
+	VendaID     *int      `json:"venda_id,omitempty"`
+	UsuarioID   int       `json:"usuario_id"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // ============================================
@@ -141,19 +201,175 @@ type OrcamentoItem struct {
 
 // Produto representa um produto da farmácia
 type Produto struct {
-	ID          int     `json:"id"`
-	Nome        string  `json:"nome"`
-	Descricao   string  `json:"descricao,omitempty"`
-	Categoria   string  `json:"categoria"`
-	Preco       float64 `json:"preco"`
-	PrecoCusto  float64 `json:"preco_custo,omitempty"`
-	Estoque     int     `json:"estoque"`
-	EstoqueMin  int     `json:"estoque_min"`
-	LojaID      int     `json:"loja_id"`
-	RequereReceita bool `json:"requere_receita"`
-	Ativo       bool    `json:"ativo"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+	ID             int       `json:"id"`
+	LojaID         int       `json:"loja_id"`
+	CodigoBarras   string    `json:"codigo_barras"`
+	Nome           string    `json:"nome"`
+	Descricao      string    `json:"descricao"`
+	Categoria      string    `json:"categoria"` // Medicamento, Perfumaria, Conveniência, etc.
+	SubCategoria   string    `json:"sub_categoria"`
+	Fabricante     string    `json:"fabricante"`
+	FornecedorID   int       `json:"fornecedor_id"`
+	
+	// Controle ANVISA
+	RegistroANVISA string    `json:"registro_anvisa"`
+	ClasseTerapeutica string `json:"classe_terapeutica"`
+	Tarja          string    `json:"tarja"` // Vermelha, Amarela, Preta, Sem Tarja
+	RequereReceita bool      `json:"requere_receita"`
+	TipoReceita    string    `json:"tipo_receita"` // A1, A2, B1, B2, C1, C2
+	
+	// Preços
+	PrecoCusto     float64   `json:"preco_custo"`
+	PrecoVenda     float64   `json:"preco_venda"`
+	MargemLucro    float64   `json:"margem_lucro"`
+	PrecoMinimo    float64   `json:"preco_minimo"` // Preço mínimo permitido
+	
+	// Estoque
+	EstoqueMinimo  int       `json:"estoque_minimo"`
+	EstoqueMaximo  int       `json:"estoque_maximo"`
+	PontoPedido    int       `json:"ponto_pedido"` // Quando repor
+	
+	// Controle
+	Ativo          bool      `json:"ativo"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// Lote representa um lote de produto
+type Lote struct {
+	ID            int       `json:"id"`
+	ProdutoID     int       `json:"produto_id"`
+	LojaID        int       `json:"loja_id"`
+	NumeroLote    string    `json:"numero_lote"`
+	DataFabricacao time.Time `json:"data_fabricacao"`
+	DataValidade  time.Time `json:"data_validade"`
+	Quantidade    int       `json:"quantidade"`
+	QuantidadeInicial int   `json:"quantidade_inicial"`
+	PrecoCusto    float64   `json:"preco_custo"`
+	PrecoVenda    float64   `json:"preco_venda"`
+	Status        string    `json:"status"` // Ativo, Vencido, Baixado
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// MovimentoEstoque registra todas as movimentações de estoque
+type MovimentoEstoque struct {
+	ID            int       `json:"id"`
+	LojaID        int       `json:"loja_id"`
+	ProdutoID     int       `json:"produto_id"`
+	LoteID        int       `json:"lote_id"`
+	Tipo          string    `json:"tipo"` // Entrada, Saída, Ajuste, Devolução, Perda
+	Quantidade    int       `json:"quantidade"`
+	SaldoAnterior int       `json:"saldo_anterior"`
+	SaldoAtual    int       `json:"saldo_atual"`
+	Motivo        string    `json:"motivo"`
+	Documento     string    `json:"documento"` // NF, Pedido, etc.
+	UsuarioID     int       `json:"usuario_id"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+// Venda representa uma venda realizada
+type Venda struct {
+	ID            int       `json:"id"`
+	LojaID        int       `json:"loja_id"`
+	ClienteID     *int      `json:"cliente_id"` // Pode ser nulo para cliente não cadastrado
+	AtendenteID   int       `json:"atendente_id"`
+	FarmaceuticoID *int     `json:"farmaceutico_id"` // Para medicamentos controlados
+	NumeroVenda   string    `json:"numero_venda"`
+	TipoPagamento string    `json:"tipo_pagamento"` // Dinheiro, Cartão, Pix
+	Status        string    `json:"status"` // Pendente, Pago, Cancelado
+	Subtotal      float64   `json:"subtotal"`
+	Desconto      float64   `json:"desconto"`
+	Total         float64   `json:"total"`
+	ReceitaAnexada bool     `json:"receita_anexada"`
+	Observacao    string    `json:"observacao"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// ItemVenda representa um item de venda
+type ItemVenda struct {
+	ID          int       `json:"id"`
+	VendaID     int       `json:"venda_id"`
+	ProdutoID   int       `json:"produto_id"`
+	LoteID      int       `json:"lote_id"`
+	Quantidade  int       `json:"quantidade"`
+	PrecoUnit   float64   `json:"preco_unit"`
+	Total       float64   `json:"total"`
+}
+
+// ReceitaMedica representa uma receita médica (RDC 527/2021)
+type ReceitaMedica struct {
+	ID             int       `json:"id"`
+	ClienteID      int       `json:"cliente_id"`
+	VendaID        *int      `json:"venda_id"`
+	NumeroReceita  string    `json:"numero_receita"`
+	DataEmissao    time.Time `json:"data_emissao"`
+	DataValidade   time.Time `json:"data_validade"`
+	MedicoNome     string    `json:"medico_nome"`
+	MedicoCRM      string    `json:"medico_crm"`
+	MedicoUF       string    `json:"medico_uf"`
+	Cid            string    `json:"cid"` // Classificação Internacional de Doenças
+	Status         string    `json:"status"` // Pendente, Validada, Rejeitada, Expirada
+	DataValidacao  *time.Time `json:"data_validacao"`
+	FarmaceuticoID int       `json:"farmaceutico_id"`
+	Observacao     string    `json:"observacao"`
+	ArquivoURL     string    `json:"arquivo_url"` // URL da imagem da receita
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// ItemReceita representa um item de uma receita
+type ItemReceita struct {
+	ID          int    `json:"id"`
+	ReceitaID   int    `json:"receita_id"`
+	ProdutoID   int    `json:"produto_id"`
+	Quantidade  int    `json:"quantidade"`
+	Posologia   string `json:"posologia"`
+	Duracao     string `json:"duracao"`
+	Observacao  string `json:"observacao"`
+}
+
+// Fornecedor representa um fornecedor
+type Fornecedor struct {
+	ID              int       `json:"id"`
+	LojaID          int       `json:"loja_id"`
+	RazaoSocial     string    `json:"razao_social"`
+	NomeFantasia    string    `json:"nome_fantasia"`
+	CNPJ            string    `json:"cnpj"`
+	IE              string    `json:"ie"`
+	InscricaoMunicipal string `json:"inscricao_municipal"`
+	Endereco        string    `json:"endereco"`
+	Numero          string    `json:"numero"`
+	Complemento     string    `json:"complemento"`
+	Bairro          string    `json:"bairro"`
+	Cidade          string    `json:"cidade"`
+	Estado          string    `json:"estado"`
+	CEP             string    `json:"cep"`
+	Telefone        string    `json:"telefone"`
+	Email           string    `json:"email"`
+	ContatoNome     string    `json:"contato_nome"`
+	ContatoTelefone string    `json:"contato_telefone"`
+	Ativo           bool      `json:"ativo"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// Compra representa uma compra de produtos
+type Compra struct {
+	ID            int       `json:"id"`
+	LojaID        int       `json:"loja_id"`
+	FornecedorID  int       `json:"fornecedor_id"`
+	NumeroNF      string    `json:"numero_nf"`
+	DataEmissao   time.Time `json:"data_emissao"`
+	DataRecebimento time.Time `json:"data_recebimento"`
+	Status        string    `json:"status"` // Em andamento, Recebido, Cancelado
+	Subtotal      float64   `json:"subtotal"`
+	Desconto      float64   `json:"desconto"`
+	Total         float64   `json:"total"`
+	Observacao    string    `json:"observacao"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // ============================================

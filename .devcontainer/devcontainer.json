@@ -1,0 +1,28 @@
+{
+  "name": "Fullstack Dev Env with Zsh",
+  "build": { "dockerfile": "Dockerfile" },
+  "features": {
+    "ghcr.io/devcontainers/features/go:1": {},
+    "ghcr.io/devcontainers/features/python:1": {},
+    "ghcr.io/devcontainers/features/node:1": {}
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh"
+      },
+      "extensions": [
+        "ms-python.python",
+        "golang.Go",
+        "dbaeumer.vscode-eslint",
+        "ms-vscode.vscode-typescript-next",
+        "ms-azuretools.vscode-docker",
+        "eamodio.gitlens",
+        "github.copilot"
+      ]
+    }
+  },
+  "forwardPorts": [3000, 8000],
+  "postCreateCommand": "npm install && pip install -r requirements.txt",
+  "remoteUser": "vscode"
+}

@@ -26,19 +26,12 @@ interface Client {
 }
 
 interface FilaStatus {
-  emAtendimento: number;
-  emEspera: number;
+  em_atendimento: number;
+  em_espera: number;
   limite: number;
 }
 
-interface AtendimentoData {
-  id: number;
-  cliente_id: number;
-  cliente: string;
-  telefone: string;
-  status: 'aguardando' | 'em_atendimento' | 'finalizado' | 'abandonado';
-  iniciado_em: string;
-}
+// Removido AtendimentoData não utilizado
 
 const Atendimento: React.FC = () => {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -50,9 +43,29 @@ const Atendimento: React.FC = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { isConnected, sendMessage, puxarCliente, on, off } = useWebSocket();
+  const { isConnected, sendMessage, on, off } = useWebSocket();
   const { get, post } = useApi();
   const { success, error: showError } = useToast();
+
+  // Buscar mensagens de um cliente
+  const fetchMessages = useCallback(async (clienteId: number) => {
+    try {
+      const data = await get(`/mensagens?cliente_id=${clienteId}`);
+      
+      const formattedMessages: Message[] = data.map((msg: any) => ({
+        id: msg.id,
+        text: msg.conteudo || msg.text,
+        sender: msg.remetente === 'cliente' ? 'user' :
+                msg.remetente === 'atendente' ? 'attendant' : 'bot',
+        timestamp: new Date(msg.enviado_em || msg.created_at),
+        status: msg.lida ? 'read' : 'delivered'
+      }));
+
+      setMessages(formattedMessages);
+    } catch (error: any) {
+      showError(error.message || 'Erro ao buscar mensagens');
+    }
+  }, [get, showError]);
 
   // Buscar dados da fila e clientes
   const fetchData = useCallback(async () => {
@@ -61,11 +74,7 @@ const Atendimento: React.FC = () => {
       
       // Buscar status da fila
       const fila = await get('/fila/status');
-      setFilaStatus({
-        emAtendimento: fila?.emAtendimento ?? fila?.em_atendimento ?? 0,
-        emEspera: fila?.emEspera ?? fila?.em_espera ?? 0,
-        limite: fila?.limite ?? 3
-      });
+      setFilaStatus(fila);
 
       // Buscar clientes na fila
       const clientesFila = await get('/fila/clientes');
@@ -88,7 +97,6 @@ const Atendimento: React.FC = () => {
         const attending = formattedClients.find(c => c.status === 'attending');
         if (attending) {
           setSelectedClient(attending);
-          // Buscar mensagens do cliente
           await fetchMessages(attending.id);
         } else {
           setSelectedClient(formattedClients[0]);
@@ -100,27 +108,7 @@ const Atendimento: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [get, selectedClient]);
-
-  // Buscar mensagens de um cliente
-  const fetchMessages = useCallback(async (clienteId: number) => {
-    try {
-      const data = await get(`/mensagens?cliente_id=${clienteId}`);
-      
-      const formattedMessages: Message[] = data.map((msg: any) => ({
-        id: msg.id,
-        text: msg.conteudo || msg.text,
-        sender: msg.remetente === 'cliente' ? 'user' :
-                msg.remetente === 'atendente' ? 'attendant' : 'bot',
-        timestamp: new Date(msg.enviado_em || msg.created_at),
-        status: msg.lida ? 'read' : 'delivered'
-      }));
-
-      setMessages(formattedMessages);
-    } catch (error: any) {
-      console.error('Erro ao buscar mensagens:', error);
-    }
-  }, [get]);
+  }, [get, selectedClient, fetchMessages, showError]);
 
   // Buscar histórico de atendimentos
   const fetchHistorico = useCallback(async () => {
@@ -146,6 +134,29 @@ const Atendimento: React.FC = () => {
       console.error('Erro ao buscar histórico:', error);
     }
   }, [get]);
+
+  // Função para puxar cliente
+  const handlePuxarCliente = useCallback(async () => {
+    try {
+      const result = await post('/fila/proximo', {});
+      
+      if (result.cliente_id) {
+        success('Cliente puxado para atendimento!');
+        await fetchData();
+        
+        // Selecionar o cliente puxado
+        const novoCliente = clients.find(c => c.id === result.cliente_id);
+        if (novoCliente) {
+          setSelectedClient(novoCliente);
+          await fetchMessages(novoCliente.id);
+        }
+      } else {
+        showError('Fila vazia');
+      }
+    } catch (error: any) {
+      showError(error.message || 'Erro ao puxar cliente');
+    }
+  }, [post, fetchData, clients, fetchMessages, success, showError]);
 
   useEffect(() => {
     // Carregar dados iniciais
@@ -191,8 +202,8 @@ const Atendimento: React.FC = () => {
     on('fila_atualizada', (data: any) => {
       setFilaStatus(prev => ({
         ...prev,
-        emAtendimento: data.emAtendimento ?? data.em_atendimento ?? prev.emAtendimento,
-        emEspera: data.emEspera ?? data.em_espera ?? prev.emEspera
+        emAtendimento: data.em_atendimento || data.emAtendimento || prev.emAtendimento,
+        emEspera: data.em_espera || data.emEspera || prev.emEspera
       }));
       
       // Recarregar lista de clientes
@@ -233,7 +244,7 @@ const Atendimento: React.FC = () => {
       off('cliente_saiu');
       off('atendimento_finalizado');
     };
-  }, [on, off, selectedClient, fetchData, success]);
+  }, [on, off, selectedClient, fetchData, success, showError]);
 
   useEffect(() => {
     scrollToBottom();
@@ -282,28 +293,6 @@ const Atendimento: React.FC = () => {
 
     setInput('');
   }, [input, selectedClient, sendMessage, post, showError]);
-
-  const handlePuxarCliente = useCallback(async () => {
-    try {
-      const result = await post('/fila/proximo', {});
-      
-      if (result.cliente_id) {
-        success('Cliente puxado para atendimento!');
-        await fetchData();
-        
-        // Selecionar o cliente puxado
-        const novoCliente = clients.find(c => c.id === result.cliente_id);
-        if (novoCliente) {
-          setSelectedClient(novoCliente);
-          await fetchMessages(novoCliente.id);
-        }
-      } else {
-        showError('Fila vazia');
-      }
-    } catch (error: any) {
-      showError(error.message || 'Erro ao puxar cliente');
-    }
-  }, [post, fetchData, clients, fetchMessages, success, showError]);
 
   const handleSelectClient = useCallback(async (client: Client) => {
     setSelectedClient(client);

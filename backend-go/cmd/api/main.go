@@ -34,7 +34,12 @@ var (
 	wsManager        *websocket.Manager
 	clienteRepo      *repository.ClienteRepository
 	atendimentoRepo  *repository.AtendimentoRepository
+	produtoRepo      *repository.ProdutoRepository
+	loteRepo         *repository.LoteRepository
+	vendaRepo        *repository.VendaRepository
 	dashboardService *services.DashboardService
+	vendaService     *services.VendaService
+	estoqueService   *services.EstoqueService
 	jwtService       *services.JWTService
 	whatsappService  *services.WhatsAppService
 	iaService        *services.IAService
@@ -61,59 +66,14 @@ func main() {
 	if err != nil {
 		zap.L().Fatal("Erro ao conectar ao MariaDB", zap.Error(err))
 	}
-
-	// Configurar pool de conexões
 	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(10)
-	db.SetConnMaxLifetime(30 * time.Minute)
-	db.SetConnMaxIdleTime(5 * time.Minute)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
 
-	// Testar conexão com retry
-	maxRetries := 5
-	for i := 0; i < maxRetries; i++ {
-		if err = db.Ping(); err == nil {
-			break
-		}
-		if i < maxRetries-1 {
-			zap.L().Warn("Falha ao pingar MariaDB, tentando novamente...",
-				zap.Int("tentativa", i+1),
-				zap.Error(err))
-			time.Sleep(time.Duration(i+1) * 2 * time.Second)
-		}
+	if err = db.Ping(); err != nil {
+		zap.L().Fatal("Erro ao pingar MariaDB", zap.Error(err))
 	}
-	if err != nil {
-		zap.L().Fatal("Erro ao pingar MariaDB após retries", zap.Error(err))
-	}
-	zap.L().Info("✅ Conectado ao MariaDB",
-		zap.Int("max_open_conns", cfg.DB.MaxOpenConns),
-		zap.Int("max_idle_conns", cfg.DB.MaxIdleConns),
-		zap.Duration("conn_max_lifetime", cfg.DB.ConnMaxLifetime),
-	)
-
-	// Adicionar função para verificar saúde da conexão
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			if err := db.Ping(); err != nil {
-				zap.L().Error("Perda de conexão com o banco", zap.Error(err))
-				// Tentar reconectar
-				db.Close()
-				db, err = sql.Open("mysql", cfg.DB.DSN)
-				if err != nil {
-					zap.L().Error("Falha ao reconectar", zap.Error(err))
-					continue
-				}
-				db.SetMaxOpenConns(cfg.DB.MaxOpenConns)
-				db.SetMaxIdleConns(cfg.DB.MaxIdleConns)
-				db.SetConnMaxLifetime(cfg.DB.ConnMaxLifetime)
-				db.SetConnMaxIdleTime(cfg.DB.ConnMaxIdleTime)
-				if err = db.Ping(); err == nil {
-					zap.L().Info("✅ Reconectado ao MariaDB")
-				}
-			}
-		}
-	}()
+	zap.L().Info("✅ Conectado ao MariaDB")
 
 	// Conectar ao Redis
 	redisClient = redis.NewClient(&redis.Options{
@@ -137,7 +97,7 @@ func main() {
 	dashboardService = services.NewDashboardService(db)
 	iaService = services.NewIAService(os.Getenv("IA_URL"))
 
-	// Inicializar WebSocket Manager (Gorilla)
+	// Inicializar WebSocket Manager (Gorilla - fallback)
 	wsManager = websocket.NewManager()
 	go wsManager.Run()
 	zap.L().Info("✅ WebSocket Manager iniciado")
@@ -145,9 +105,15 @@ func main() {
 	// Inicializar Socket.IO Server
 	socketServer, err = initSocketIOServer()
 	if err != nil {
-		zap.L().Fatal("Erro ao iniciar Socket.IO", zap.Error(err))
+		zap.L().Warn("Erro ao iniciar Socket.IO, usando apenas WebSocket nativo", zap.Error(err))
+	} else {
+		go func() {
+			if err := socketServer.Serve(); err != nil {
+				zap.L().Error("Erro no Socket.IO server", zap.Error(err))
+			}
+		}()
+		zap.L().Info("✅ Socket.IO Server iniciado")
 	}
-	zap.L().Info("✅ Socket.IO Server iniciado")
 
 	// Configurar rotas
 	router := setupRouter()
@@ -192,43 +158,76 @@ func main() {
 func initSocketIOServer() (*socketio.Server, error) {
 	server := socketio.NewServer(nil)
 
-	// Conexão
+	// Middleware para autenticação
 	server.OnConnect("/", func(s socketio.Conn) error {
-		zap.L().Info("🔌 Cliente Socket.IO conectado", zap.String("id", s.ID()))
-
 		// Extrair token da query
-		url := s.URL()
-		query := url.Query()
+		u := s.URL()
+		query := u.Query()
 		token := query.Get("token")
 
-		// Validar token
-		if token != "" {
-			claims, err := jwtService.ValidateToken(token)
-			if err == nil {
-				s.SetContext(map[string]interface{}{
-					"user_id": claims.UserID,
-					"loja_id": claims.LojaID,
-					"role":    claims.Role,
-				})
-				zap.L().Info("✅ Token validado", zap.Int("user_id", claims.UserID))
-			} else {
-				zap.L().Warn("⚠️ Token inválido", zap.Error(err))
-			}
+		if token == "" {
+			zap.L().Warn("🔴 Conexão Socket.IO sem token")
+			return nil // Permite conexão sem token para testes
 		}
+
+		// Validar token
+		claims, err := jwtService.ValidateToken(token)
+		if err != nil {
+			zap.L().Warn("🔴 Token inválido no Socket.IO", zap.Error(err))
+			return nil // Permite conexão mesmo com token inválido
+		}
+
+		// Armazenar dados do usuário
+		s.SetContext(map[string]interface{}{
+			"user_id": claims.UserID,
+			"loja_id": claims.LojaID,
+			"role":    claims.Role,
+		})
+
+		zap.L().Info("✅ Cliente Socket.IO autenticado",
+			zap.Int("user_id", claims.UserID),
+			zap.String("id", s.ID()),
+		)
+
+		// Entrar na sala da loja
+		room := getRoomName(claims.LojaID)
+		s.Join(room)
+
+		// Enviar confirmação
+		s.Emit("connected", map[string]interface{}{
+			"status":  "ok",
+			"user_id": claims.UserID,
+			"loja_id": claims.LojaID,
+		})
 
 		return nil
 	})
 
-	// Desconexão
 	server.OnDisconnect("/", func(s socketio.Conn, reason string) {
-		zap.L().Info("🔌 Cliente Socket.IO desconectado", zap.String("id", s.ID()), zap.String("reason", reason))
+		zap.L().Info("🔌 Cliente Socket.IO desconectado",
+			zap.String("id", s.ID()),
+			zap.String("reason", reason),
+		)
 	})
 
 	// Evento: nova_mensagem
 	server.OnEvent("/", "nova_mensagem", func(s socketio.Conn, msg map[string]interface{}) {
-		zap.L().Info("📩 Nova mensagem recebida", zap.Any("msg", msg))
+		zap.L().Info("📩 Nova mensagem recebida via Socket.IO", zap.Any("msg", msg))
 
-		// Reenviar para todos os clientes na sala da loja
+		// Extrair cliente_id
+		clienteID := 0
+		if id, ok := msg["cliente_id"]; ok {
+			if val, ok := id.(float64); ok {
+				clienteID = int(val)
+			}
+		}
+
+		if clienteID == 0 {
+			zap.L().Warn("Mensagem sem cliente_id")
+			return
+		}
+
+		// Extrair loja_id
 		lojaID := 1
 		if id, ok := msg["loja_id"]; ok {
 			if val, ok := id.(float64); ok {
@@ -236,6 +235,26 @@ func initSocketIOServer() (*socketio.Server, error) {
 			}
 		}
 
+		// Salvar mensagem no banco
+		if db != nil {
+			// Buscar atendimento ativo
+			var atendimentoID int
+			err := db.QueryRow(`
+				SELECT id FROM atendimentos 
+				WHERE cliente_id = ? AND status IN ('aguardando', 'em_atendimento')
+				ORDER BY iniciado_em DESC LIMIT 1
+			`, clienteID).Scan(&atendimentoID)
+
+			if err == nil {
+				// Inserir mensagem
+				_, _ = db.Exec(`
+					INSERT INTO mensagens (atendimento_id, remetente, conteudo, tipo)
+					VALUES (?, 'atendente', ?, 'texto')
+				`, atendimentoID, msg["mensagem"])
+			}
+		}
+
+		// Broadcast para todos na sala da loja
 		room := getRoomName(lojaID)
 		server.BroadcastToRoom("/", room, "nova_mensagem", msg)
 
@@ -246,9 +265,8 @@ func initSocketIOServer() (*socketio.Server, error) {
 
 	// Evento: puxar_cliente
 	server.OnEvent("/", "puxar_cliente", func(s socketio.Conn, data interface{}) {
-		zap.L().Info("🎯 Puxar cliente solicitado")
+		zap.L().Info("🎯 Puxar cliente solicitado via Socket.IO")
 
-		// Processar a fila
 		ctx := context.Background()
 		clienteID, err := filaService.ProximoClienteAtendimento(ctx)
 		if err != nil {
@@ -295,7 +313,7 @@ func initSocketIOServer() (*socketio.Server, error) {
 
 	// Evento: finalizar_atendimento
 	server.OnEvent("/", "atendimento_finalizado", func(s socketio.Conn, data map[string]interface{}) {
-		zap.L().Info("✅ Atendimento finalizado", zap.Any("data", data))
+		zap.L().Info("✅ Atendimento finalizado via Socket.IO", zap.Any("data", data))
 
 		clienteID := 0
 		if id, ok := data["cliente_id"]; ok {
@@ -318,19 +336,6 @@ func initSocketIOServer() (*socketio.Server, error) {
 			room := getRoomName(1)
 			server.BroadcastToRoom("/", room, "atendimento_finalizado", msg)
 		}
-	})
-
-	// Evento: typing
-	server.OnEvent("/", "typing", func(s socketio.Conn, data map[string]interface{}) {
-		lojaID := 1
-		if id, ok := data["loja_id"]; ok {
-			if val, ok := id.(float64); ok {
-				lojaID = int(val)
-			}
-		}
-
-		room := getRoomName(lojaID)
-		server.BroadcastToRoom("/", room, "typing", data)
 	})
 
 	// Evento: join_room
@@ -356,17 +361,11 @@ func initSocketIOServer() (*socketio.Server, error) {
 		})
 	})
 
-	go func() {
-		if err := server.Serve(); err != nil {
-			zap.L().Error("Erro no Socket.IO server", zap.Error(err))
-		}
-	}()
-
 	return server, nil
 }
 
 func getRoomName(lojaID int) string {
-	return "loja_" + string(rune(lojaID))
+	return "loja_" + strconv.Itoa(lojaID)
 }
 
 // ============================================
@@ -385,13 +384,15 @@ func setupRouter() *gin.Engine {
 	})
 
 	// Socket.IO - rotas compatíveis
-	router.GET("/socket.io/*any", gin.WrapH(socketServer))
-	router.POST("/socket.io/*any", gin.WrapH(socketServer))
-	router.OPTIONS("/socket.io/*any", func(c *gin.Context) {
-		c.Status(http.StatusOK)
-	})
+	if socketServer != nil {
+		router.GET("/socket.io/*any", gin.WrapH(socketServer))
+		router.POST("/socket.io/*any", gin.WrapH(socketServer))
+		router.OPTIONS("/socket.io/*any", func(c *gin.Context) {
+			c.Status(http.StatusOK)
+		})
+	}
 
-	// WebSocket nativo (Gorilla) - para compatibilidade
+	// WebSocket nativo (Gorilla)
 	router.GET("/ws", wsHandler)
 
 	api := router.Group("/api/v1")
@@ -410,44 +411,90 @@ func setupRouter() *gin.Engine {
 			// Dashboard
 			auth.GET("/dashboard", getDashboard)
 			auth.GET("/dashboard/metricas", getMetricasDetalhadas)
+
+			// Fila
 			auth.GET("/fila/status", getFilaStatus)
 			auth.GET("/fila/clientes", getFilaClientes)
 			auth.POST("/fila/proximo", puxarProximoCliente)
 			auth.PUT("/fila/config", configurarLimite)
+			// ============================================
+			// ROTAS DE VENDAS (PDV) - FASE 2
+			// ============================================
+			auth.POST("/vendas", criarVendaHandler)
+			auth.GET("/vendas/:id", getVendaHandler)
+			auth.GET("/vendas", listarVendasHandler)
+			auth.POST("/vendas/:id/cancelar", cancelarVendaHandler)
+			auth.GET("/vendas/relatorio/diario", relatorioVendasHandler)
+
+			// ============================================
+			// ROTAS DE DASHBOARD FARMACÊUTICO
+			// ============================================
+			auth.GET("/dashboard/farmacia", dashboardFarmaciaHandler)
+
+			// ============================================
+			// ROTAS DE CLIENTES (expandido)
+			// ============================================
+			// auth.GET("/clientes/historico/:id", getClienteHistoricoHandler)
+			// auth.GET("/clientes/fidelidade/:id", getClienteFidelidadeHandler)
+
+			// Clientes
 			auth.GET("/clientes", listarClientes)
 			auth.GET("/clientes/:id", getCliente)
 			auth.POST("/clientes", criarCliente)
 			auth.PUT("/clientes/:id", atualizarCliente)
+
+			// Atendimentos
 			auth.GET("/atendimentos", listarAtendimentos)
 			auth.GET("/atendimentos/:id", getAtendimento)
-			auth.POST("/atendimentos/:id/finalizar", finalizarAtendimento)
+			auth.POST("/atendimentos/:id/finalizar", finalizarAtendimentoHandler)
+			auth.POST("/atendimentos/:id/abandonar", abandonarAtendimentoHandler)
 			auth.POST("/atendimentos/:id/enviar", enviarMensagem)
+
+			// Mensagens
 			auth.GET("/mensagens", listarMensagens)
 			auth.GET("/mensagens/:id", getMensagem)
-			auth.GET("/produtos", listarProdutos)
-			auth.GET("/produtos/:id", getProduto)
-			auth.POST("/produtos", criarProduto)
-			auth.PUT("/produtos/:id", atualizarProduto)
-			auth.DELETE("/produtos/:id", deletarProduto)
+
+			// Produtos
+			auth.GET("/produtos", listarProdutosHandler)
+			auth.GET("/produtos/:id", getProdutoHandler)
+			auth.GET("/produtos/codigo/:codigo", getProdutoPorCodigoHandler)
+			auth.POST("/produtos", criarProdutoHandler)
+			auth.PUT("/produtos/:id", atualizarProdutoHandler)
+
+			// Estoque
+			auth.POST("/estoque/entrada", entradaEstoqueHandler)
+			auth.POST("/estoque/saida", saidaEstoqueHandler)
+			auth.GET("/estoque/lotes/:produto_id", listarLotesHandler)
+			auth.GET("/estoque/alertas", alertasEstoqueHandler)
+
+			// Orçamentos
 			auth.GET("/orcamentos", listarOrcamentos)
 			auth.GET("/orcamentos/:id", getOrcamento)
 			auth.POST("/orcamentos", criarOrcamento)
 			auth.PUT("/orcamentos/:id", atualizarOrcamento)
 			auth.POST("/orcamentos/:id/aprovar", aprovarOrcamento)
 			auth.POST("/orcamentos/:id/rejeitar", rejeitarOrcamento)
+
+			// IA
 			auth.GET("/ia/produtos", listarProdutosIA)
 			auth.POST("/ia/orcamento", processarOrcamentoIA)
+
+			// Usuários
 			auth.GET("/usuarios", listarUsuarios)
 			auth.GET("/usuarios/:id", getUsuario)
 			auth.POST("/usuarios", criarUsuario)
 			auth.PUT("/usuarios/:id", atualizarUsuario)
 			auth.PATCH("/usuarios/:id/toggle", toggleUsuario)
 			auth.DELETE("/usuarios/:id", deletarUsuario)
+
+			// Reclamações
 			auth.GET("/reclamacoes", listarReclamacoes)
 			auth.GET("/reclamacoes/:id", getReclamacao)
 			auth.POST("/reclamacoes", criarReclamacao)
 			auth.PUT("/reclamacoes/:id", atualizarReclamacao)
 			auth.POST("/reclamacoes/:id/resolver", resolverReclamacao)
+
+			// Configurações
 			auth.GET("/configuracoes", listarConfiguracoes)
 			auth.PUT("/configuracoes", atualizarConfiguracao)
 		}
@@ -477,6 +524,127 @@ func wsHandler(c *gin.Context) {
 		lojaID = 1
 	}
 	wsManager.ServeWS(c.Writer, c.Request, userID, lojaID)
+}
+
+// ============================================
+// HANDLERS DE ESTOQUE
+// ============================================
+
+// entradaEstoqueHandler realiza entrada de estoque
+func entradaEstoqueHandler(c *gin.Context) {
+	var req struct {
+		ProdutoID      int       `json:"produto_id"`
+		NumeroLote     string    `json:"numero_lote"`
+		DataFabricacao time.Time `json:"data_fabricacao"`
+		DataValidade   time.Time `json:"data_validade"`
+		Quantidade     int       `json:"quantidade"`
+		PrecoCusto     float64   `json:"preco_custo"`
+		PrecoVenda     float64   `json:"preco_venda"`
+	}
+
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Dados inválidos"})
+		return
+	}
+
+	lojaID, _ := c.Get("lojaID")
+	usuarioID, _ := c.Get("userID")
+
+	// Criar lote
+	lote := &models.Lote{
+		LojaID:            lojaID.(int),
+		ProdutoID:         req.ProdutoID,
+		NumeroLote:        req.NumeroLote,
+		DataFabricacao:    req.DataFabricacao,
+		DataValidade:      req.DataValidade,
+		Quantidade:        req.Quantidade,
+		QuantidadeInicial: req.Quantidade,
+		PrecoCusto:        req.PrecoCusto,
+		PrecoVenda:        req.PrecoVenda,
+	}
+
+	if err := estoqueService.EntradaEstoque(
+		c.Request.Context(),
+		req.ProdutoID,
+		lojaID.(int),
+		lote,
+		usuarioID.(int),
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"message": "Entrada de estoque realizada com sucesso",
+		"lote":    lote,
+	})
+}
+
+// saidaEstoqueHandler realiza saída de estoque
+func saidaEstoqueHandler(c *gin.Context) {
+	var req struct {
+		ProdutoID  int    `json:"produto_id"`
+		LoteID     int    `json:"lote_id"`
+		Quantidade int    `json:"quantidade"`
+		Motivo     string `json:"motivo"`
+		Documento  string `json:"documento"`
+	}
+
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Dados inválidos"})
+		return
+	}
+
+	lojaID, _ := c.Get("lojaID")
+	usuarioID, _ := c.Get("userID")
+
+	if err := estoqueService.SaidaEstoque(
+		c.Request.Context(),
+		req.ProdutoID,
+		lojaID.(int),
+		req.Quantidade,
+		req.LoteID,
+		usuarioID.(int),
+		req.Motivo,
+		req.Documento,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Saída de estoque realizada com sucesso",
+	})
+}
+
+// listarLotesHandler lista lotes de um produto
+func listarLotesHandler(c *gin.Context) {
+	produtoID, err := strconv.Atoi(c.Param("produto_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID do produto inválido"})
+		return
+	}
+
+	lojaID, _ := c.Get("lojaID")
+	lotes, err := loteRepo.BuscarLotesPorProduto(produtoID, lojaID.(int))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, lotes)
+}
+
+// alertasEstoqueHandler retorna alertas de estoque
+func alertasEstoqueHandler(c *gin.Context) {
+	lojaID, _ := c.Get("lojaID")
+	alertas, err := estoqueService.ObterAlertasEstoque(c.Request.Context(), lojaID.(int))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, alertas)
 }
 
 // ============ AUTENTICAÇÃO ============
@@ -732,6 +900,194 @@ func getMetricasDetalhadas(c *gin.Context) {
 		"satisfacao":        satisfacao,
 		"relatorio":         relatorio,
 		"timestamp":         time.Now().Format(time.RFC3339),
+	})
+}
+
+// ============ ATENDIMENTOS ============
+
+// finalizarAtendimentoHandler finaliza um atendimento
+func finalizarAtendimentoHandler(c *gin.Context) {
+	atendimentoID := c.Param("id")
+	if atendimentoID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID do atendimento é obrigatório"})
+		return
+	}
+
+	id, err := strconv.Atoi(atendimentoID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID inválido"})
+		return
+	}
+
+	// Buscar atendimento para obter cliente_id
+	var clienteID int
+	var statusAtual string
+	err = db.QueryRow(`
+		SELECT cliente_id, status FROM atendimentos WHERE id = ?
+	`, id).Scan(&clienteID, &statusAtual)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Atendimento não encontrado"})
+			return
+		}
+		zap.L().Error("Erro ao buscar atendimento", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao buscar atendimento"})
+		return
+	}
+
+	// Verificar se o atendimento já está finalizado
+	if statusAtual == models.StatusFinalizado || statusAtual == models.StatusAbandonado {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Atendimento já está finalizado ou abandonado"})
+		return
+	}
+
+	// Finalizar na fila (Redis)
+	ctx := context.Background()
+	err = filaService.FinalizarAtendimentoComDados(ctx, clienteID, id, db)
+	if err != nil {
+		zap.L().Error("Erro ao finalizar atendimento", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao finalizar atendimento"})
+		return
+	}
+
+	// Notificar via WebSocket (Gorilla)
+	msg, _ := json.Marshal(gin.H{
+		"type": "atendimento_finalizado",
+		"payload": gin.H{
+			"atendimento_id": id,
+			"cliente_id":     clienteID,
+			"status":         "finalizado",
+		},
+	})
+	wsManager.EnviarParaClientes(1, msg)
+
+	// Notificar via Socket.IO (se disponível)
+	if socketServer != nil {
+		room := getRoomName(1)
+		socketServer.BroadcastToRoom("/", room, "atendimento_finalizado", map[string]interface{}{
+			"atendimento_id": id,
+			"cliente_id":     clienteID,
+			"status":         "finalizado",
+		})
+	}
+
+	// Tentar puxar próximo cliente automaticamente
+	go func() {
+		ctx := context.Background()
+		novoClienteID, err := filaService.ProximoClienteAtendimento(ctx)
+		if err == nil && novoClienteID > 0 {
+			// Buscar dados do cliente
+			var nome, telefone string
+			err = db.QueryRow(`
+				SELECT nome, telefone FROM clientes WHERE id = ?
+			`, novoClienteID).Scan(&nome, &telefone)
+
+			if err == nil {
+				// Notificar via WebSocket
+				msg, _ := json.Marshal(gin.H{
+					"type": "fila_atualizada",
+					"payload": gin.H{
+						"cliente_id": novoClienteID,
+						"nome":       nome,
+						"telefone":   telefone,
+						"status":     "em_atendimento",
+					},
+				})
+				wsManager.EnviarParaClientes(1, msg)
+
+				// Notificar via Socket.IO
+				if socketServer != nil {
+					room := getRoomName(1)
+					socketServer.BroadcastToRoom("/", room, "fila_atualizada", map[string]interface{}{
+						"cliente_id": novoClienteID,
+						"nome":       nome,
+						"telefone":   telefone,
+						"status":     "em_atendimento",
+					})
+				}
+			}
+		}
+	}()
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":     "Atendimento finalizado com sucesso",
+		"cliente_id":  clienteID,
+		"atendimento": id,
+	})
+}
+
+// abandonarAtendimentoHandler marca um atendimento como abandonado
+func abandonarAtendimentoHandler(c *gin.Context) {
+	atendimentoID := c.Param("id")
+	if atendimentoID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID do atendimento é obrigatório"})
+		return
+	}
+
+	id, err := strconv.Atoi(atendimentoID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID inválido"})
+		return
+	}
+
+	// Buscar atendimento para obter cliente_id
+	var clienteID int
+	var statusAtual string
+	err = db.QueryRow(`
+		SELECT cliente_id, status FROM atendimentos WHERE id = ?
+	`, id).Scan(&clienteID, &statusAtual)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Atendimento não encontrado"})
+			return
+		}
+		zap.L().Error("Erro ao buscar atendimento", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao buscar atendimento"})
+		return
+	}
+
+	// Verificar se o atendimento já está finalizado
+	if statusAtual == models.StatusFinalizado || statusAtual == models.StatusAbandonado {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Atendimento já está finalizado ou abandonado"})
+		return
+	}
+
+	// Abandonar na fila
+	ctx := context.Background()
+	err = filaService.AbandonarAtendimento(ctx, clienteID, id, db)
+	if err != nil {
+		zap.L().Error("Erro ao abandonar atendimento", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao abandonar atendimento"})
+		return
+	}
+
+	// Notificar via WebSocket
+	msg, _ := json.Marshal(gin.H{
+		"type": "atendimento_abandonado",
+		"payload": gin.H{
+			"atendimento_id": id,
+			"cliente_id":     clienteID,
+			"status":         "abandonado",
+		},
+	})
+	wsManager.EnviarParaClientes(1, msg)
+
+	// Notificar via Socket.IO
+	if socketServer != nil {
+		room := getRoomName(1)
+		socketServer.BroadcastToRoom("/", room, "atendimento_abandonado", map[string]interface{}{
+			"atendimento_id": id,
+			"cliente_id":     clienteID,
+			"status":         "abandonado",
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":     "Atendimento abandonado",
+		"cliente_id":  clienteID,
+		"atendimento": id,
 	})
 }
 
@@ -1229,192 +1585,291 @@ func getMensagem(c *gin.Context) {
 	c.JSON(http.StatusOK, mensagem)
 }
 
-// ============ PRODUTOS ============
+// ============================================
+// HANDLERS DE VENDAS (PDV)
+// ============================================
 
-func listarProdutos(c *gin.Context) {
-	lojaID, _ := c.Get("lojaID")
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
-	categoria := c.DefaultQuery("categoria", "")
-
-	query := `
-		SELECT id, nome, descricao, categoria, preco, estoque, estoque_min, 
-		       requere_receita, ativo, created_at
-		FROM produtos
-		WHERE loja_id = ?
-	`
-	args := []interface{}{lojaID}
-
-	if categoria != "" {
-		query += " AND categoria = ?"
-		args = append(args, categoria)
+// criarVendaHandler processa uma nova venda
+func criarVendaHandler(c *gin.Context) {
+	var req struct {
+		ClienteID      *int               `json:"cliente_id"`
+		TipoPagamento  string             `json:"tipo_pagamento"`
+		Desconto       float64            `json:"desconto"`
+		ReceitaAnexada bool               `json:"receita_anexada"`
+		Observacao     string             `json:"observacao"`
+		Itens          []models.ItemVenda `json:"itens"`
 	}
 
-	query += " ORDER BY nome ASC LIMIT ? OFFSET ?"
-	args = append(args, limit, offset)
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Dados inválidos"})
+		return
+	}
 
-	rows, err := db.Query(query, args...)
+	lojaID, _ := c.Get("lojaID")
+	usuarioID, _ := c.Get("userID")
+
+	// Validar itens
+	if len(req.Itens) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Venda deve ter pelo menos um item"})
+		return
+	}
+
+	// Criar venda
+	venda := &models.Venda{
+		LojaID:         lojaID.(int),
+		ClienteID:      req.ClienteID,
+		TipoPagamento:  req.TipoPagamento,
+		Desconto:       req.Desconto,
+		ReceitaAnexada: req.ReceitaAnexada,
+		Observacao:     req.Observacao,
+	}
+
+	// Processar venda
+	result, err := vendaService.ProcessarVenda(c.Request.Context(), venda, req.Itens, usuarioID.(int))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
-	var produtos []gin.H
-	for rows.Next() {
-		var id int
-		var nome, descricao, categoria string
-		var preco float64
-		var estoque, estoqueMin int
-		var requereReceita, ativo bool
-		var createdAt time.Time
-
-		if err := rows.Scan(&id, &nome, &descricao, &categoria, &preco, &estoque, &estoqueMin,
-			&requereReceita, &ativo, &createdAt); err != nil {
-			continue
-		}
-
-		produtos = append(produtos, gin.H{
-			"id":              id,
-			"nome":            nome,
-			"descricao":       descricao,
-			"categoria":       categoria,
-			"preco":           preco,
-			"estoque":         estoque,
-			"estoque_min":     estoqueMin,
-			"requere_receita": requereReceita,
-			"ativo":           ativo,
-			"created_at":      createdAt,
-		})
-	}
-
-	c.JSON(http.StatusOK, produtos)
-}
-
-func getProduto(c *gin.Context) {
-	id := c.Param("id")
-	lojaID, _ := c.Get("lojaID")
-
-	var produto gin.H
-	var descricao, nome, categoria string
-	var preco float64
-	var estoque, estoqueMin int
-	var requereReceita, ativo bool
-	var createdAt time.Time
-
-	err := db.QueryRow(`
-		SELECT nome, descricao, categoria, preco, estoque, estoque_min, 
-		       requere_receita, ativo, created_at
-		FROM produtos
-		WHERE id = ? AND loja_id = ?
-	`, id, lojaID).Scan(
-		&nome, &descricao, &categoria, &preco, &estoque, &estoqueMin,
-		&requereReceita, &ativo, &createdAt,
-	)
-
+	// Buscar venda completa com itens
+	vendaCompleta, err := vendaRepo.BuscarVendaPorID(result.ID)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "produto não encontrado"})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	produto = gin.H{
-		"id":              id,
-		"nome":            nome,
-		"descricao":       descricao,
-		"categoria":       categoria,
-		"preco":           preco,
-		"estoque":         estoque,
-		"estoque_min":     estoqueMin,
-		"requere_receita": requereReceita,
-		"ativo":           ativo,
-		"created_at":      createdAt,
+	// Notificar via WebSocket
+	msg, _ := json.Marshal(gin.H{
+		"type": "nova_venda",
+		"payload": gin.H{
+			"venda_id":     vendaCompleta.ID,
+			"numero_venda": vendaCompleta.NumeroVenda,
+			"total":        vendaCompleta.Total,
+			"itens":        len(req.Itens),
+		},
+	})
+	wsManager.EnviarParaClientes(lojaID.(int), msg)
+
+	c.JSON(http.StatusCreated, gin.H{
+		"message": "Venda realizada com sucesso",
+		"venda":   vendaCompleta,
+	})
+}
+
+// getVendaHandler busca uma venda por ID
+func getVendaHandler(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID inválido"})
+		return
+	}
+
+	venda, err := vendaRepo.BuscarVendaPorID(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if venda == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Venda não encontrada"})
+		return
+	}
+
+	c.JSON(http.StatusOK, venda)
+}
+
+// listarVendasHandler lista vendas com filtros
+func listarVendasHandler(c *gin.Context) {
+	lojaID, _ := c.Get("lojaID")
+	status := c.DefaultQuery("status", "")
+	dataInicio := c.DefaultQuery("data_inicio", "")
+	dataFim := c.DefaultQuery("data_fim", "")
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+
+	vendas, total, err := vendaRepo.ListarVendas(lojaID.(int), status, dataInicio, dataFim, limit, offset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"items": vendas,
+		"total": total,
+		"page":  offset/limit + 1,
+		"limit": limit,
+	})
+}
+
+// cancelarVendaHandler cancela uma venda
+func cancelarVendaHandler(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID inválido"})
+		return
+	}
+
+	usuarioID, _ := c.Get("userID")
+
+	if err := vendaService.CancelarVenda(c.Request.Context(), id, usuarioID.(int)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Venda cancelada com sucesso",
+	})
+}
+
+// relatorioVendasHandler gera relatório de vendas
+func relatorioVendasHandler(c *gin.Context) {
+	lojaID, _ := c.Get("lojaID")
+	data := c.DefaultQuery("data", "")
+
+	relatorio, err := vendaService.RelatorioVendasDiarias(c.Request.Context(), lojaID.(int), data)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, relatorio)
+}
+
+// ============================================
+// HANDLERS DE PRODUTOS
+// ============================================
+
+// listarProdutosHandler lista todos os produtos
+func listarProdutosHandler(c *gin.Context) {
+	lojaID, _ := c.Get("lojaID")
+	categoria := c.DefaultQuery("categoria", "")
+	ativo := c.DefaultQuery("ativo", "")
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+
+	var ativoPtr *bool
+	if ativo != "" {
+		val := ativo == "true"
+		ativoPtr = &val
+	}
+
+	produtos, total, err := produtoRepo.ListarProdutos(lojaID.(int), categoria, ativoPtr, limit, offset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"items": produtos,
+		"total": total,
+		"page":  offset/limit + 1,
+		"limit": limit,
+	})
+}
+
+// getProdutoHandler busca um produto por ID
+func getProdutoHandler(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID inválido"})
+		return
+	}
+
+	lojaID, _ := c.Get("lojaID")
+	produto, err := produtoRepo.BuscarProdutoPorID(id, lojaID.(int))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if produto == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Produto não encontrado"})
+		return
 	}
 
 	c.JSON(http.StatusOK, produto)
 }
 
-func criarProduto(c *gin.Context) {
-	lojaID, _ := c.Get("lojaID")
-	var req struct {
-		Nome           string  `json:"nome"`
-		Descricao      string  `json:"descricao"`
-		Categoria      string  `json:"categoria"`
-		Preco          float64 `json:"preco"`
-		Estoque        int     `json:"estoque"`
-		EstoqueMin     int     `json:"estoque_min"`
-		RequereReceita bool    `json:"requere_receita"`
-	}
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "dados inválidos"})
+// getProdutoPorCodigoHandler busca produto por código de barras
+func getProdutoPorCodigoHandler(c *gin.Context) {
+	codigo := c.Param("codigo")
+	if codigo == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Código de barras é obrigatório"})
 		return
 	}
 
-	result, err := db.Exec(`
-		INSERT INTO produtos (loja_id, nome, descricao, categoria, preco, estoque, estoque_min, requere_receita)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, lojaID, req.Nome, req.Descricao, req.Categoria, req.Preco, req.Estoque, req.EstoqueMin, req.RequereReceita)
-
+	lojaID, _ := c.Get("lojaID")
+	produto, err := produtoRepo.BuscarProdutoPorCodigoBarras(codigo, lojaID.(int))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	if produto == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Produto não encontrado"})
+		return
+	}
 
-	id, _ := result.LastInsertId()
-	c.JSON(http.StatusCreated, gin.H{"id": id, "message": "Produto criado com sucesso"})
+	c.JSON(http.StatusOK, produto)
 }
 
-func atualizarProduto(c *gin.Context) {
-	id := c.Param("id")
-	lojaID, _ := c.Get("lojaID")
-	var req struct {
-		Nome           string  `json:"nome"`
-		Descricao      string  `json:"descricao"`
-		Categoria      string  `json:"categoria"`
-		Preco          float64 `json:"preco"`
-		Estoque        int     `json:"estoque"`
-		EstoqueMin     int     `json:"estoque_min"`
-		RequereReceita bool    `json:"requere_receita"`
-		Ativo          bool    `json:"ativo"`
-	}
+// criarProdutoHandler cria um novo produto
+func criarProdutoHandler(c *gin.Context) {
+	var req models.Produto
 	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "dados inválidos"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Dados inválidos"})
 		return
 	}
 
-	_, err := db.Exec(`
-		UPDATE produtos SET 
-			nome = ?, descricao = ?, categoria = ?, preco = ?, 
-			estoque = ?, estoque_min = ?, requere_receita = ?, ativo = ?
-		WHERE id = ? AND loja_id = ?
-	`, req.Nome, req.Descricao, req.Categoria, req.Preco,
-		req.Estoque, req.EstoqueMin, req.RequereReceita, req.Ativo, id, lojaID)
+	lojaID, _ := c.Get("lojaID")
+	req.LojaID = lojaID.(int)
+	req.Ativo = true
 
-	if err != nil {
+	if err := produtoRepo.CriarProduto(&req); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Produto atualizado com sucesso"})
+	c.JSON(http.StatusCreated, gin.H{
+		"message": "Produto criado com sucesso",
+		"produto": req,
+	})
 }
 
-func deletarProduto(c *gin.Context) {
-	id := c.Param("id")
+// atualizarProdutoHandler atualiza um produto
+func atualizarProdutoHandler(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID inválido"})
+		return
+	}
+
 	lojaID, _ := c.Get("lojaID")
-
-	_, err := db.Exec(`
-		DELETE FROM produtos WHERE id = ? AND loja_id = ?
-	`, id, lojaID)
-
+	produto, err := produtoRepo.BuscarProdutoPorID(id, lojaID.(int))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	if produto == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Produto não encontrado"})
+		return
+	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Produto excluído com sucesso"})
+	var req models.Produto
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Dados inválidos"})
+		return
+	}
+
+	req.ID = id
+	req.LojaID = lojaID.(int)
+
+	if err := produtoRepo.AtualizarProduto(&req); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Produto atualizado com sucesso",
+		"produto": req,
+	})
 }
 
 // ============ ORÇAMENTOS ============
@@ -2059,6 +2514,146 @@ func resolverReclamacao(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Reclamação resolvida com sucesso"})
+}
+
+// ============================================
+// HANDLER DE DASHBOARD FARMACÊUTICO
+// ============================================
+
+func dashboardFarmaciaHandler(c *gin.Context) {
+	lojaID, _ := c.Get("lojaID")
+	ctx := c.Request.Context()
+
+	// 1. Vendas do dia
+	var vendasHoje int
+	var faturamentoHoje float64
+	db.QueryRowContext(ctx, `
+		SELECT 
+			COUNT(*) as total,
+			COALESCE(SUM(total), 0) as faturamento
+		FROM vendas
+		WHERE loja_id = ? AND DATE(created_at) = CURDATE() AND status = 'Pago'
+	`, lojaID).Scan(&vendasHoje, &faturamentoHoje)
+
+	// 2. Vendas do mês
+	var vendasMes int
+	var faturamentoMes float64
+	db.QueryRowContext(ctx, `
+		SELECT 
+			COUNT(*) as total,
+			COALESCE(SUM(total), 0) as faturamento
+		FROM vendas
+		WHERE loja_id = ? AND MONTH(created_at) = MONTH(CURDATE()) 
+		AND YEAR(created_at) = YEAR(CURDATE()) AND status = 'Pago'
+	`, lojaID).Scan(&vendasMes, &faturamentoMes)
+
+	// 3. Ticket médio
+	var ticketMedio float64
+	db.QueryRowContext(ctx, `
+		SELECT COALESCE(AVG(total), 0)
+		FROM vendas
+		WHERE loja_id = ? AND DATE(created_at) = CURDATE() AND status = 'Pago'
+	`, lojaID).Scan(&ticketMedio)
+
+	// 4. Produtos com estoque baixo
+	var produtosBaixoEstoque int
+	db.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT p.id)
+		FROM produtos p
+		LEFT JOIN lotes l ON p.id = l.produto_id AND l.status = 'Ativo'
+		WHERE p.loja_id = ? AND p.ativo = 1
+		GROUP BY p.id
+		HAVING COALESCE(SUM(l.quantidade), 0) <= p.estoque_minimo
+	`, lojaID).Scan(&produtosBaixoEstoque)
+
+	// 5. Produtos vencendo (próximos 30 dias)
+	var produtosVencendo int
+	db.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT produto_id)
+		FROM lotes
+		WHERE loja_id = ? AND status = 'Ativo'
+		AND data_validade BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY)
+	`, lojaID).Scan(&produtosVencendo)
+
+	// 6. Receitas pendentes
+	var receitasPendentes int
+	db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM receitas_medicas
+		WHERE loja_id = ? AND status = 'Pendente'
+	`, lojaID).Scan(&receitasPendentes)
+
+	// 7. Comparativo mês anterior
+	var comparativo float64
+	db.QueryRowContext(ctx, `
+		SELECT 
+			COALESCE(
+				(
+					SELECT SUM(total) FROM vendas 
+					WHERE loja_id = ? AND MONTH(created_at) = MONTH(CURDATE()) 
+					AND YEAR(created_at) = YEAR(CURDATE()) AND status = 'Pago'
+				) * 100.0 / 
+				NULLIF(
+					(
+						SELECT SUM(total) FROM vendas 
+						WHERE loja_id = ? AND MONTH(created_at) = MONTH(DATE_SUB(CURDATE(), INTERVAL 1 MONTH)) 
+						AND YEAR(created_at) = YEAR(DATE_SUB(CURDATE(), INTERVAL 1 MONTH)) AND status = 'Pago'
+					), 0
+				) - 100,
+				0
+			)
+	`, lojaID, lojaID).Scan(&comparativo)
+
+	// 8. Últimas vendas
+	rows, err := db.QueryContext(ctx, `
+		SELECT v.id, v.numero_venda, v.total, v.created_at, 
+			COALESCE(c.nome, 'Cliente não identificado') as cliente
+		FROM vendas v
+		LEFT JOIN clientes c ON v.cliente_id = c.id
+		WHERE v.loja_id = ? AND v.status = 'Pago'
+		ORDER BY v.created_at DESC
+		LIMIT 5
+	`, lojaID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var ultimasVendas []map[string]interface{}
+	for rows.Next() {
+		var id int
+		var numeroVenda string
+		var total float64
+		var createdAt time.Time
+		var cliente string
+
+		if err := rows.Scan(&id, &numeroVenda, &total, &createdAt, &cliente); err != nil {
+			continue
+		}
+
+		ultimasVendas = append(ultimasVendas, map[string]interface{}{
+			"id":           id,
+			"numero_venda": numeroVenda,
+			"cliente":      cliente,
+			"total":        total,
+			"data":         createdAt.Format("2006-01-02 15:04:05"),
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"vendas_hoje":            vendasHoje,
+		"faturamento_hoje":       faturamentoHoje,
+		"vendas_mes":             vendasMes,
+		"faturamento_mes":        faturamentoMes,
+		"ticket_medio":           ticketMedio,
+		"produtos_baixo_estoque": produtosBaixoEstoque,
+		"produtos_vencendo":      produtosVencendo,
+		"receitas_pendentes":     receitasPendentes,
+		"comparativo_mes":        comparativo,
+		"ultimas_vendas":         ultimasVendas,
+		"timestamp":              time.Now().Format(time.RFC3339),
+	})
 }
 
 // ============ MÉTRICAS DE ATENDIMENTO ============
