@@ -19,7 +19,9 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
+	"github.com/Starkgd5/saas-atendimento/internal/cache"
 	"github.com/Starkgd5/saas-atendimento/internal/config"
+	"github.com/Starkgd5/saas-atendimento/internal/middleware"
 	"github.com/Starkgd5/saas-atendimento/internal/models"
 	"github.com/Starkgd5/saas-atendimento/internal/repository"
 	"github.com/Starkgd5/saas-atendimento/internal/services"
@@ -28,22 +30,28 @@ import (
 
 // Variáveis globais
 var (
-	db               *sql.DB
-	redisClient      *redis.Client
-	filaService      *services.FilaService
-	wsManager        *websocket.Manager
-	clienteRepo      *repository.ClienteRepository
-	atendimentoRepo  *repository.AtendimentoRepository
-	produtoRepo      *repository.ProdutoRepository
-	loteRepo         *repository.LoteRepository
-	vendaRepo        *repository.VendaRepository
-	dashboardService *services.DashboardService
-	vendaService     *services.VendaService
-	estoqueService   *services.EstoqueService
-	jwtService       *services.JWTService
-	whatsappService  *services.WhatsAppService
-	iaService        *services.IAService
-	socketServer     *socketio.Server
+	db                *sql.DB
+	redisClient       *redis.Client
+	cacheService      *cache.CacheService
+	cacheInvalidation *services.CacheInvalidationService
+	filaService       *services.FilaService
+	wsManager         *websocket.Manager
+	clienteRepo       *repository.ClienteRepository
+	atendimentoRepo   *repository.AtendimentoRepository
+	dashboardService  *services.DashboardService
+	jwtService        *services.JWTService
+	whatsappService   *services.WhatsAppService
+	iaService         *services.IAService
+	socketServer      *socketio.Server
+
+	// Novos repositórios e serviços
+	produtoRepo     *repository.ProdutoRepository
+	loteRepo        *repository.LoteRepository
+	movimentoRepo   *repository.MovimentoEstoqueRepository
+	vendaRepo       *repository.VendaRepository
+	estoqueService  *services.EstoqueService
+	vendaService    *services.VendaService
+	cacheMiddleware *middleware.CacheMiddleware
 )
 
 func main() {
@@ -86,9 +94,21 @@ func main() {
 	}
 	zap.L().Info("✅ Conectado ao Redis")
 
+	// ============================================
+	// INICIALIZAR CACHE
+	// ============================================
+	cacheService = cache.NewCacheService(redisClient)
+	cacheInvalidation = services.NewCacheInvalidationService(cacheService)
+	cacheMiddleware = middleware.NewCacheMiddleware(cacheService, 30*time.Second)
+	zap.L().Info("✅ Cache Service inicializado")
+
 	// Inicializar repositórios
 	clienteRepo = repository.NewClienteRepository(db)
 	atendimentoRepo = repository.NewAtendimentoRepository(db)
+	produtoRepo = repository.NewProdutoRepository(db)
+	loteRepo = repository.NewLoteRepository(db)
+	movimentoRepo = repository.NewMovimentoEstoqueRepository(db)
+	vendaRepo = repository.NewVendaRepository(db)
 
 	// Inicializar serviços
 	filaService = services.NewFilaService(redisClient, cfg.MaxClients)
@@ -96,6 +116,10 @@ func main() {
 	whatsappService = services.NewWhatsAppService(&cfg.WhatsApp)
 	dashboardService = services.NewDashboardService(db)
 	iaService = services.NewIAService(os.Getenv("IA_URL"))
+
+	// Novos serviços
+	estoqueService = services.NewEstoqueService(produtoRepo, loteRepo, movimentoRepo, db)
+	vendaService = services.NewVendaService(vendaRepo, produtoRepo, loteRepo, estoqueService, db)
 
 	// Inicializar WebSocket Manager (Gorilla - fallback)
 	wsManager = websocket.NewManager()
@@ -369,7 +393,7 @@ func getRoomName(lojaID int) string {
 }
 
 // ============================================
-// SETUP ROUTER
+// SETUP ROUTER COM CACHE
 // ============================================
 
 func setupRouter() *gin.Engine {
@@ -377,13 +401,13 @@ func setupRouter() *gin.Engine {
 	router.Use(gin.Recovery())
 	router.Use(corsMiddleware())
 
-	// Health Check
+	// Health Check (sem cache)
 	router.GET("/health", healthCheck)
 	router.GET("/ping", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"pong": true})
 	})
 
-	// Socket.IO - rotas compatíveis
+	// Socket.IO
 	if socketServer != nil {
 		router.GET("/socket.io/*any", gin.WrapH(socketServer))
 		router.POST("/socket.io/*any", gin.WrapH(socketServer))
@@ -392,7 +416,7 @@ func setupRouter() *gin.Engine {
 		})
 	}
 
-	// WebSocket nativo (Gorilla)
+	// WebSocket nativo
 	router.GET("/ws", wsHandler)
 
 	api := router.Group("/api/v1")
@@ -407,95 +431,73 @@ func setupRouter() *gin.Engine {
 		// Rotas protegidas (JWT)
 		auth := api.Group("/")
 		auth.Use(authMiddleware())
-		{
-			// Dashboard
-			auth.GET("/dashboard", getDashboard)
-			auth.GET("/dashboard/metricas", getMetricasDetalhadas)
 
-			// Fila
+		// Aplicar cache em GET requests com diferentes TTLs
+		{
+			// Dashboard - cache curto (30s)
+			auth.GET("/dashboard", cacheMiddleware.Cache(30*time.Second), getDashboard)
+			auth.GET("/dashboard/metricas", cacheMiddleware.Cache(30*time.Second), getMetricasDetalhadas)
+			auth.GET("/dashboard/farmacia", cacheMiddleware.Cache(30*time.Second), dashboardFarmaciaHandler)
+
+			// Produtos - cache médio (5min)
+			auth.GET("/produtos", cacheMiddleware.Cache(5*time.Minute), listarProdutosHandler)
+			auth.GET("/produtos/:id", cacheMiddleware.Cache(5*time.Minute), getProdutoHandler)
+			auth.GET("/produtos/codigo/:codigo", cacheMiddleware.Cache(5*time.Minute), getProdutoPorCodigoHandler)
+			auth.POST("/produtos", criarProdutoHandler)
+			auth.PUT("/produtos/:id", atualizarProdutoHandler)
+
+			// Clientes - cache médio (5min)
+			auth.GET("/clientes", cacheMiddleware.Cache(5*time.Minute), listarClientes)
+			auth.GET("/clientes/:id", cacheMiddleware.Cache(5*time.Minute), getCliente)
+
+			// Fila - sem cache (dados em tempo real)
 			auth.GET("/fila/status", getFilaStatus)
 			auth.GET("/fila/clientes", getFilaClientes)
 			auth.POST("/fila/proximo", puxarProximoCliente)
 			auth.PUT("/fila/config", configurarLimite)
-			// ============================================
-			// ROTAS DE VENDAS (PDV) - FASE 2
-			// ============================================
-			auth.POST("/vendas", criarVendaHandler)
-			auth.GET("/vendas/:id", getVendaHandler)
-			auth.GET("/vendas", listarVendasHandler)
-			auth.POST("/vendas/:id/cancelar", cancelarVendaHandler)
-			auth.GET("/vendas/relatorio/diario", relatorioVendasHandler)
 
-			// ============================================
-			// ROTAS DE DASHBOARD FARMACÊUTICO
-			// ============================================
-			auth.GET("/dashboard/farmacia", dashboardFarmaciaHandler)
-
-			// ============================================
-			// ROTAS DE CLIENTES (expandido)
-			// ============================================
-			// auth.GET("/clientes/historico/:id", getClienteHistoricoHandler)
-			// auth.GET("/clientes/fidelidade/:id", getClienteFidelidadeHandler)
-
-			// Clientes
-			auth.GET("/clientes", listarClientes)
-			auth.GET("/clientes/:id", getCliente)
-			auth.POST("/clientes", criarCliente)
-			auth.PUT("/clientes/:id", atualizarCliente)
-
-			// Atendimentos
-			auth.GET("/atendimentos", listarAtendimentos)
-			auth.GET("/atendimentos/:id", getAtendimento)
-			auth.POST("/atendimentos/:id/finalizar", finalizarAtendimentoHandler)
-			auth.POST("/atendimentos/:id/abandonar", abandonarAtendimentoHandler)
-			auth.POST("/atendimentos/:id/enviar", enviarMensagem)
-
-			// Mensagens
-			auth.GET("/mensagens", listarMensagens)
-			auth.GET("/mensagens/:id", getMensagem)
-
-			// Produtos
-			auth.GET("/produtos", listarProdutosHandler)
-			auth.GET("/produtos/:id", getProdutoHandler)
-			auth.GET("/produtos/codigo/:codigo", getProdutoPorCodigoHandler)
-			auth.POST("/produtos", criarProdutoHandler)
-			auth.PUT("/produtos/:id", atualizarProdutoHandler)
-
-			// Estoque
+			// Estoque - cache curto (1min)
+			auth.GET("/estoque/lotes/:produto_id", cacheMiddleware.Cache(1*time.Minute), listarLotesHandler)
+			auth.GET("/estoque/alertas", cacheMiddleware.Cache(1*time.Minute), alertasEstoqueHandler)
 			auth.POST("/estoque/entrada", entradaEstoqueHandler)
 			auth.POST("/estoque/saida", saidaEstoqueHandler)
-			auth.GET("/estoque/lotes/:produto_id", listarLotesHandler)
-			auth.GET("/estoque/alertas", alertasEstoqueHandler)
 
-			// Orçamentos
-			auth.GET("/orcamentos", listarOrcamentos)
-			auth.GET("/orcamentos/:id", getOrcamento)
+			// Vendas - cache curto (1min)
+			auth.GET("/vendas", cacheMiddleware.Cache(1*time.Minute), listarVendasHandler)
+			auth.GET("/vendas/:id", cacheMiddleware.Cache(1*time.Minute), getVendaHandler)
+			auth.GET("/vendas/relatorio/diario", cacheMiddleware.Cache(1*time.Minute), relatorioVendasHandler)
+			auth.POST("/vendas", criarVendaHandler)
+			auth.POST("/vendas/:id/cancelar", cancelarVendaHandler)
+
+			// Orçamentos - cache médio (5min)
+			auth.GET("/orcamentos", cacheMiddleware.Cache(5*time.Minute), listarOrcamentos)
+			auth.GET("/orcamentos/:id", cacheMiddleware.Cache(5*time.Minute), getOrcamento)
 			auth.POST("/orcamentos", criarOrcamento)
 			auth.PUT("/orcamentos/:id", atualizarOrcamento)
 			auth.POST("/orcamentos/:id/aprovar", aprovarOrcamento)
 			auth.POST("/orcamentos/:id/rejeitar", rejeitarOrcamento)
 
-			// IA
+			// IA - sem cache
 			auth.GET("/ia/produtos", listarProdutosIA)
 			auth.POST("/ia/orcamento", processarOrcamentoIA)
 
-			// Usuários
-			auth.GET("/usuarios", listarUsuarios)
-			auth.GET("/usuarios/:id", getUsuario)
+			// Usuários - cache longo (15min)
+			auth.GET("/usuarios", cacheMiddleware.Cache(15*time.Minute), listarUsuarios)
+			auth.GET("/usuarios/:id", cacheMiddleware.Cache(15*time.Minute), getUsuario)
 			auth.POST("/usuarios", criarUsuario)
 			auth.PUT("/usuarios/:id", atualizarUsuario)
 			auth.PATCH("/usuarios/:id/toggle", toggleUsuario)
 			auth.DELETE("/usuarios/:id", deletarUsuario)
 
-			// Reclamações
-			auth.GET("/reclamacoes", listarReclamacoes)
-			auth.GET("/reclamacoes/:id", getReclamacao)
+			// Reclamações - cache curto (2min)
+			auth.GET("/reclamacoes", cacheMiddleware.Cache(2*time.Minute), listarReclamacoes)
+			auth.GET("/reclamacoes/:id", cacheMiddleware.Cache(2*time.Minute), getReclamacao)
 			auth.POST("/reclamacoes", criarReclamacao)
 			auth.PUT("/reclamacoes/:id", atualizarReclamacao)
 			auth.POST("/reclamacoes/:id/resolver", resolverReclamacao)
 
-			// Configurações
-			auth.GET("/configuracoes", listarConfiguracoes)
+			// Configurações - cache longo (30min)
+			auth.GET("/configuracoes", cacheMiddleware.Cache(30*time.Minute), listarConfiguracoes)
 			auth.PUT("/configuracoes", atualizarConfiguracao)
 		}
 	}
