@@ -1,56 +1,12 @@
-import { io, Socket } from 'socket.io-client';
-
-// Tipos de eventos do WebSocket
-export const SOCKET_EVENTS = {
-  CONNECT: 'connect',
-  DISCONNECT: 'disconnect',
-  CONNECT_ERROR: 'connect_error',
-  RECONNECT: 'reconnect',
-  RECONNECT_ATTEMPT: 'reconnect_attempt',
-  RECONNECT_ERROR: 'reconnect_error',
-  RECONNECT_FAILED: 'reconnect_failed',
-  
-  // Eventos customizados
-  NOVA_MENSAGEM: 'nova_mensagem',
-  FILA_ATUALIZADA: 'fila_atualizada',
-  CLIENTE_ENTROU: 'cliente_entrou',
-  CLIENTE_SAIU: 'cliente_saiu',
-  ATENDIMENTO_FINALIZADO: 'atendimento_finalizado',
-  TYPING: 'typing',
-  PONG: 'pong',
-} as const;
-
-export type SocketEvent = typeof SOCKET_EVENTS[keyof typeof SOCKET_EVENTS];
-
-interface SocketOptions {
-  url?: string;
-  token?: string;
-  autoConnect?: boolean;
-  reconnection?: boolean;
-  reconnectionAttempts?: number;
-  reconnectionDelay?: number;
-  reconnectionDelayMax?: number;
-  timeout?: number;
-}
-
-interface MessagePayload {
-  type: string;
-  payload: any;
-  from?: string;
-  to?: string;
-  room?: string;
-  time?: Date;
-}
-
 class SocketService {
   private static instance: SocketService;
-  private socket: Socket | null = null;
+  private ws: WebSocket | null = null;
   private isConnected = false;
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
+  private reconnectTimeout: NodeJS.Timeout | null = null;
   private eventHandlers: Map<string, Set<Function>> = new Map();
-  private connectionPromise: Promise<Socket> | null = null;
-  private connectionResolve: (() => void) | null = null;
+  private pingInterval: NodeJS.Timeout | null = null;
 
   private constructor() {}
 
@@ -61,166 +17,123 @@ class SocketService {
     return SocketService.instance;
   }
 
-  // ============================================
-  // CONEXÃO
-  // ============================================
+  connect(token: string = ''): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        resolve();
+        return;
+      }
 
-  connect(options: SocketOptions = {}): Promise<Socket> {
-    if (this.socket?.connected) {
-      return Promise.resolve(this.socket);
-    }
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const host = process.env.REACT_APP_WS_URL || `${protocol}//localhost:8080`;
+      const tokenParam = token || localStorage.getItem('token') || '';
+      const url = `${host}/ws?token=${encodeURIComponent(tokenParam)}`;
 
-    // Se já estiver conectando, retorna a promise existente
-    if (this.connectionPromise) {
-      return this.connectionPromise;
-    }
+      console.log(`🔌 Conectando WebSocket: ${url}`);
 
-    this.connectionPromise = new Promise((resolve, reject) => {
-      const {
-        url = process.env.REACT_APP_WS_URL || 'ws://localhost:8080',
-        token = localStorage.getItem('token') || '',
-        autoConnect = true,
-        reconnection = true,
-        reconnectionAttempts = 5,
-        reconnectionDelay = 1000,
-        reconnectionDelayMax = 5000,
-        timeout = 10000,
-      } = options;
+      try {
+        this.ws = new WebSocket(url);
 
-      this.maxReconnectAttempts = reconnectionAttempts;
+        this.ws.onopen = () => {
+          console.log('✅ WebSocket conectado');
+          this.isConnected = true;
+          this.reconnectAttempts = 0;
+          this.emitEvent('connect', {});
+          
+          if (this.pingInterval) {
+            clearInterval(this.pingInterval);
+          }
+          this.pingInterval = setInterval(() => {
+            if (this.ws?.readyState === WebSocket.OPEN) {
+              this.ws.send(JSON.stringify({ type: 'ping' }));
+            }
+          }, 30000);
+          
+          resolve();
+        };
 
-      this.socket = io(url, {
-        transports: ['websocket'],
-        query: { token },
-        autoConnect,
-        reconnection,
-        reconnectionAttempts,
-        reconnectionDelay,
-        reconnectionDelayMax,
-        timeout,
-        forceNew: true,
-        path: '/socket.io/',
-      });
+        this.ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            console.log('📩 Mensagem recebida:', data);
+            
+            if (data.type === 'pong') {
+              console.log('🏓 Pong recebido');
+              return;
+            }
+            
+            this.emitEvent(data.type || 'message', data);
+          } catch (error) {
+            console.error('❌ Erro ao processar mensagem:', error);
+          }
+        };
 
-      // Eventos padrão
-      this.socket.on(SOCKET_EVENTS.CONNECT, () => {
-        this.isConnected = true;
-        this.reconnectAttempts = 0;
-        console.log('✅ WebSocket conectado');
-        this.emit(SOCKET_EVENTS.PONG, { time: new Date() });
-        this.connectionResolve?.();
-        this.connectionResolve = null;
-        resolve(this.socket!);
-      });
+        this.ws.onerror = (error) => {
+          console.error('❌ Erro no WebSocket:', error);
+          this.emitEvent('error', { error });
+        };
 
-      this.socket.on(SOCKET_EVENTS.DISCONNECT, (reason) => {
-        this.isConnected = false;
-        console.log(`🔌 WebSocket desconectado: ${reason}`);
-        this.emitEvent(SOCKET_EVENTS.DISCONNECT, { reason });
-      });
+        this.ws.onclose = (event) => {
+          console.log(`🔌 WebSocket desconectado: ${event.code} - ${event.reason}`);
+          this.isConnected = false;
+          this.emitEvent('disconnect', { code: event.code, reason: event.reason });
 
-      this.socket.on(SOCKET_EVENTS.CONNECT_ERROR, (error) => {
-        console.error('❌ Erro no WebSocket:', error);
-        this.emitEvent(SOCKET_EVENTS.CONNECT_ERROR, { error });
-        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-          reject(error);
-          this.connectionResolve = null;
-        }
-      });
+          if (this.pingInterval) {
+            clearInterval(this.pingInterval);
+            this.pingInterval = null;
+          }
 
-      this.socket.on(SOCKET_EVENTS.RECONNECT, (attemptNumber) => {
-        console.log(`🔄 WebSocket reconectado após ${attemptNumber} tentativas`);
-        this.emitEvent(SOCKET_EVENTS.RECONNECT, { attemptNumber });
-      });
+          if (this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.reconnectAttempts++;
+            const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+            console.log(`🔄 Reconectando em ${delay}ms... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+            
+            if (this.reconnectTimeout) {
+              clearTimeout(this.reconnectTimeout);
+            }
+            this.reconnectTimeout = setTimeout(() => {
+              this.connect().catch(() => {});
+            }, delay);
+          } else {
+            console.error('❌ Falha na reconexão após múltiplas tentativas');
+            this.emitEvent('reconnect_failed', {});
+          }
+        };
 
-      this.socket.on(SOCKET_EVENTS.RECONNECT_ATTEMPT, (attemptNumber) => {
-        this.reconnectAttempts = attemptNumber;
-        console.log(`🔄 Tentativa de reconexão ${attemptNumber}/${this.maxReconnectAttempts}`);
-        this.emitEvent(SOCKET_EVENTS.RECONNECT_ATTEMPT, { attemptNumber });
-      });
-
-      this.socket.on(SOCKET_EVENTS.RECONNECT_ERROR, (error) => {
-        console.error('❌ Erro na reconexão:', error);
-        this.emitEvent(SOCKET_EVENTS.RECONNECT_ERROR, { error });
-      });
-
-      this.socket.on(SOCKET_EVENTS.RECONNECT_FAILED, () => {
-        console.error('❌ Falha na reconexão após múltiplas tentativas');
-        this.emitEvent(SOCKET_EVENTS.RECONNECT_FAILED, {});
-        reject(new Error('Falha na reconexão'));
-        this.connectionResolve = null;
-      });
-
-      // Eventos customizados
-      this.socket.on(SOCKET_EVENTS.NOVA_MENSAGEM, (data) => {
-        this.emitEvent(SOCKET_EVENTS.NOVA_MENSAGEM, data);
-      });
-
-      this.socket.on(SOCKET_EVENTS.FILA_ATUALIZADA, (data) => {
-        this.emitEvent(SOCKET_EVENTS.FILA_ATUALIZADA, data);
-      });
-
-      this.socket.on(SOCKET_EVENTS.CLIENTE_ENTROU, (data) => {
-        this.emitEvent(SOCKET_EVENTS.CLIENTE_ENTROU, data);
-      });
-
-      this.socket.on(SOCKET_EVENTS.CLIENTE_SAIU, (data) => {
-        this.emitEvent(SOCKET_EVENTS.CLIENTE_SAIU, data);
-      });
-
-      this.socket.on(SOCKET_EVENTS.ATENDIMENTO_FINALIZADO, (data) => {
-        this.emitEvent(SOCKET_EVENTS.ATENDIMENTO_FINALIZADO, data);
-      });
-
-      this.socket.on(SOCKET_EVENTS.TYPING, (data) => {
-        this.emitEvent(SOCKET_EVENTS.TYPING, data);
-      });
-
-      // Qualquer outro evento
-      this.socket.onAny((event, ...args) => {
-        this.emitEvent(event, ...args);
-      });
-
-      this.connectionResolve = () => {
-        resolve(this.socket!);
-      };
-
-      if (autoConnect && !this.socket.connected) {
-        this.socket.connect();
+      } catch (error) {
+        console.error('❌ Erro ao criar WebSocket:', error);
+        reject(error);
       }
     });
-
-    return this.connectionPromise;
   }
 
-  // ============================================
-  // DESCONEXÃO
-  // ============================================
-
   disconnect(): void {
-    if (this.socket) {
-      this.socket.disconnect();
-      this.socket.removeAllListeners();
-      this.socket = null;
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+    if (this.ws) {
+      this.ws.close(1000, 'Desconectado manualmente');
+      this.ws = null;
     }
     this.isConnected = false;
-    this.connectionPromise = null;
-    this.connectionResolve = null;
+    this.reconnectAttempts = 0;
     console.log('🔌 WebSocket desconectado manualmente');
   }
 
-  // ============================================
-  // ENVIO DE MENSAGENS
-  // ============================================
-
   emit(event: string, data: any): boolean {
-    if (!this.socket || !this.isConnected) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       console.warn(`⚠️ Tentativa de emitir evento "${event}" sem conexão`);
       return false;
     }
 
     try {
-      this.socket.emit(event, data);
+      const message = JSON.stringify({ type: event, payload: data });
+      this.ws.send(message);
       return true;
     } catch (error) {
       console.error(`❌ Erro ao emitir evento "${event}":`, error);
@@ -228,73 +141,23 @@ class SocketService {
     }
   }
 
-  // Enviar mensagem no chat
-  sendMessage(clienteId: number, mensagem: string, remetente: string = 'atendente'): boolean {
-    return this.emit(SOCKET_EVENTS.NOVA_MENSAGEM, {
-      cliente_id: clienteId,
-      mensagem,
-      remetente,
-      time: new Date(),
-    });
-  }
-
-  // Puxar próximo cliente da fila
-  puxarCliente(): boolean {
-    return this.emit('puxar_cliente', {});
-  }
-
-  // Finalizar atendimento
-  finalizarAtendimento(clienteId: number): boolean {
-    return this.emit(SOCKET_EVENTS.ATENDIMENTO_FINALIZADO, {
-      cliente_id: clienteId,
-      time: new Date(),
-    });
-  }
-
-  // Indicar digitação
-  sendTyping(clienteId: number, isTyping: boolean): boolean {
-    return this.emit(SOCKET_EVENTS.TYPING, {
-      cliente_id: clienteId,
-      is_typing: isTyping,
-      time: new Date(),
-    });
-  }
-
-  // ============================================
-  // EVENTOS
-  // ============================================
-
   on(event: string, callback: Function): void {
     if (!this.eventHandlers.has(event)) {
       this.eventHandlers.set(event, new Set());
     }
     this.eventHandlers.get(event)?.add(callback);
-
-    // Se já estiver conectado e tiver listener no socket
-    if (this.socket) {
-      this.socket.on(event, (data) => {
-        this.emitEvent(event, data);
-      });
-    }
   }
 
   off(event: string, callback?: Function): void {
     if (!callback) {
       this.eventHandlers.delete(event);
-      if (this.socket) {
-        this.socket.off(event);
-      }
       return;
     }
-
     const handlers = this.eventHandlers.get(event);
     if (handlers) {
       handlers.delete(callback);
       if (handlers.size === 0) {
         this.eventHandlers.delete(event);
-        if (this.socket) {
-          this.socket.off(event);
-        }
       }
     }
   }
@@ -307,12 +170,12 @@ class SocketService {
     this.on(event, onceCallback);
   }
 
-  private emitEvent(event: string, ...args: any[]): void {
+  private emitEvent(event: string, data: any): void {
     const handlers = this.eventHandlers.get(event);
     if (handlers) {
       handlers.forEach((callback) => {
         try {
-          callback(...args);
+          callback(data);
         } catch (error) {
           console.error(`❌ Erro no handler do evento "${event}":`, error);
         }
@@ -320,63 +183,49 @@ class SocketService {
     }
   }
 
-  // ============================================
-  // STATUS
-  // ============================================
-
   isConnectedToServer(): boolean {
-    return (this.isConnected && this.socket?.connected) || false;
+    return this.isConnected && this.ws?.readyState === WebSocket.OPEN;
   }
 
   getSocketId(): string | null {
-    return this.socket?.id || null;
+    return this.ws?.url || null;
   }
 
   getReconnectAttempts(): number {
     return this.reconnectAttempts;
   }
 
-  // ============================================
-  // RECONEXÃO MANUAL
-  // ============================================
-
-  reconnect(): void {
-    if (this.socket && !this.isConnected) {
-      console.log('🔄 Tentando reconectar manualmente...');
-      this.socket.connect();
-    }
-  }
-
-  // ============================================
-  // LIMPEZA
-  // ============================================
-
-  clearAllListeners(): void {
-    this.eventHandlers.clear();
-    if (this.socket) {
-      this.socket.removeAllListeners();
-    }
-  }
-
-  // ============================================
-  // UTILITÁRIOS
-  // ============================================
-
-  getConnectionStatus(): {
-    isConnected: boolean;
-    socketId: string | null;
-    reconnectAttempts: number;
-  } {
+  getConnectionStatus(): { isConnected: boolean; socketId: string | null; reconnectAttempts: number } {
     return {
       isConnected: this.isConnected,
       socketId: this.getSocketId(),
       reconnectAttempts: this.reconnectAttempts,
     };
   }
+
+  // Métodos de conveniência
+  sendMessage(clienteId: number, mensagem: string, remetente: string = 'atendente'): boolean {
+    return this.emit('nova_mensagem', {
+      cliente_id: clienteId,
+      mensagem,
+      remetente,
+      time: new Date().toISOString()
+    });
+  }
+
+  puxarCliente(): boolean {
+    return this.emit('puxar_cliente', {});
+  }
+
+  finalizarAtendimento(clienteId: number): boolean {
+    return this.emit('atendimento_finalizado', {
+      cliente_id: clienteId,
+      time: new Date().toISOString()
+    });
+  }
+
+  // Remover método que não existe
+  // clearAllListeners() foi removido
 }
 
-// Exportar instância única
 export default SocketService.getInstance();
-
-// Exportar tipos
-export type { SocketOptions, MessagePayload };

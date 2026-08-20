@@ -44,7 +44,7 @@ var (
 	iaService         *services.IAService
 	socketServer      *socketio.Server
 
-	// Novos repositórios e serviços
+	// Novos repositórios
 	produtoRepo     *repository.ProdutoRepository
 	loteRepo        *repository.LoteRepository
 	movimentoRepo   *repository.MovimentoEstoqueRepository
@@ -185,20 +185,20 @@ func initSocketIOServer() (*socketio.Server, error) {
 	// Middleware para autenticação
 	server.OnConnect("/", func(s socketio.Conn) error {
 		// Extrair token da query
-		u := s.URL()
-		query := u.Query()
+		url := s.URL()
+		query := url.Query()
 		token := query.Get("token")
 
 		if token == "" {
 			zap.L().Warn("🔴 Conexão Socket.IO sem token")
-			return nil // Permite conexão sem token para testes
+			return nil
 		}
 
 		// Validar token
 		claims, err := jwtService.ValidateToken(token)
 		if err != nil {
 			zap.L().Warn("🔴 Token inválido no Socket.IO", zap.Error(err))
-			return nil // Permite conexão mesmo com token inválido
+			return nil
 		}
 
 		// Armazenar dados do usuário
@@ -238,7 +238,6 @@ func initSocketIOServer() (*socketio.Server, error) {
 	server.OnEvent("/", "nova_mensagem", func(s socketio.Conn, msg map[string]interface{}) {
 		zap.L().Info("📩 Nova mensagem recebida via Socket.IO", zap.Any("msg", msg))
 
-		// Extrair cliente_id
 		clienteID := 0
 		if id, ok := msg["cliente_id"]; ok {
 			if val, ok := id.(float64); ok {
@@ -251,30 +250,10 @@ func initSocketIOServer() (*socketio.Server, error) {
 			return
 		}
 
-		// Extrair loja_id
 		lojaID := 1
 		if id, ok := msg["loja_id"]; ok {
 			if val, ok := id.(float64); ok {
 				lojaID = int(val)
-			}
-		}
-
-		// Salvar mensagem no banco
-		if db != nil {
-			// Buscar atendimento ativo
-			var atendimentoID int
-			err := db.QueryRow(`
-				SELECT id FROM atendimentos 
-				WHERE cliente_id = ? AND status IN ('aguardando', 'em_atendimento')
-				ORDER BY iniciado_em DESC LIMIT 1
-			`, clienteID).Scan(&atendimentoID)
-
-			if err == nil {
-				// Inserir mensagem
-				_, _ = db.Exec(`
-					INSERT INTO mensagens (atendimento_id, remetente, conteudo, tipo)
-					VALUES (?, 'atendente', ?, 'texto')
-				`, atendimentoID, msg["mensagem"])
 			}
 		}
 
@@ -309,14 +288,12 @@ func initSocketIOServer() (*socketio.Server, error) {
 			return
 		}
 
-		// Buscar cliente
 		cliente, err := clienteRepo.BuscarClientePorID(clienteID)
 		if err != nil {
 			zap.L().Error("Erro ao buscar cliente", zap.Error(err))
 			return
 		}
 
-		// Notificar todos
 		msg := map[string]interface{}{
 			"cliente_id": clienteID,
 			"nome":       cliente.Nome,
@@ -327,55 +304,11 @@ func initSocketIOServer() (*socketio.Server, error) {
 		room := getRoomName(1)
 		server.BroadcastToRoom("/", room, "fila_atualizada", msg)
 
-		// Também enviar via Gorilla
 		payload, _ := json.Marshal(map[string]interface{}{
 			"type":    "fila_atualizada",
 			"payload": msg,
 		})
 		wsManager.EnviarParaClientes(1, payload)
-	})
-
-	// Evento: finalizar_atendimento
-	server.OnEvent("/", "atendimento_finalizado", func(s socketio.Conn, data map[string]interface{}) {
-		zap.L().Info("✅ Atendimento finalizado via Socket.IO", zap.Any("data", data))
-
-		clienteID := 0
-		if id, ok := data["cliente_id"]; ok {
-			if val, ok := id.(float64); ok {
-				clienteID = int(val)
-			}
-		}
-
-		if clienteID > 0 {
-			// Finalizar na fila
-			ctx := context.Background()
-			filaService.FinalizarAtendimento(ctx, clienteID)
-
-			// Notificar todos
-			msg := map[string]interface{}{
-				"cliente_id": clienteID,
-				"status":     "finalizado",
-			}
-
-			room := getRoomName(1)
-			server.BroadcastToRoom("/", room, "atendimento_finalizado", msg)
-		}
-	})
-
-	// Evento: join_room
-	server.OnEvent("/", "join_room", func(s socketio.Conn, room string) {
-		if room != "" {
-			s.Join(room)
-			zap.L().Info("📥 Cliente entrou na sala", zap.String("room", room), zap.String("id", s.ID()))
-		}
-	})
-
-	// Evento: leave_room
-	server.OnEvent("/", "leave_room", func(s socketio.Conn, room string) {
-		if room != "" {
-			s.Leave(room)
-			zap.L().Info("📤 Cliente saiu da sala", zap.String("room", room), zap.String("id", s.ID()))
-		}
 	})
 
 	// Evento: ping
@@ -516,15 +449,26 @@ func healthCheck(c *gin.Context) {
 	})
 }
 
+// WebSocket Handler - deve estar usando Gorilla WebSocket
 func wsHandler(c *gin.Context) {
-	userID, _ := strconv.Atoi(c.Query("user_id"))
-	if userID == 0 {
-		userID = 1
+	// Extrair token da query
+	token := c.Query("token")
+	if token == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Token não fornecido"})
+		return
 	}
-	lojaID, _ := strconv.Atoi(c.Query("loja_id"))
-	if lojaID == 0 {
-		lojaID = 1
+
+	// Validar token
+	claims, err := jwtService.ValidateToken(token)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Token inválido"})
+		return
 	}
+
+	userID := claims.UserID
+	lojaID := claims.LojaID
+
+	// Serve WebSocket
 	wsManager.ServeWS(c.Writer, c.Request, userID, lojaID)
 }
 
@@ -1616,7 +1560,7 @@ func criarVendaHandler(c *gin.Context) {
 		return
 	}
 
-	// Criar venda
+	// Criar venda com os itens
 	venda := &models.Venda{
 		LojaID:         lojaID.(int),
 		ClienteID:      req.ClienteID,
@@ -1624,6 +1568,7 @@ func criarVendaHandler(c *gin.Context) {
 		Desconto:       req.Desconto,
 		ReceitaAnexada: req.ReceitaAnexada,
 		Observacao:     req.Observacao,
+		Itens:          req.Itens, // ← Passar os itens
 	}
 
 	// Processar venda
@@ -1647,10 +1592,15 @@ func criarVendaHandler(c *gin.Context) {
 			"venda_id":     vendaCompleta.ID,
 			"numero_venda": vendaCompleta.NumeroVenda,
 			"total":        vendaCompleta.Total,
-			"itens":        len(req.Itens),
+			"itens":        len(vendaCompleta.Itens),
 		},
 	})
 	wsManager.EnviarParaClientes(lojaID.(int), msg)
+
+	// Invalidar cache
+	ctx := context.Background()
+	cacheInvalidation.InvalidateVenda(ctx, lojaID.(int))
+	cacheInvalidation.InvalidateDashboard(ctx, lojaID.(int))
 
 	c.JSON(http.StatusCreated, gin.H{
 		"message": "Venda realizada com sucesso",

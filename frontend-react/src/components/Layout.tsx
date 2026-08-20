@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
-import './Layout.css';
+require('./Layout.css');
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -30,45 +30,87 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
 
   // Menu items com roles (definido fora do componente para evitar recriação)
   const allMenuItems: MenuItem[] = useMemo(() => [
-    { path: '/dashboard', icon: '📊', label: 'Dashboard' },
-    { path: '/atendimento', icon: '💬', label: 'Atendimento' },
-    { 
-      path: '/produtos', 
-      icon: '📦', 
-      label: 'Produtos',
-      roles: ['admin', 'gerente'] 
-    },
-    { 
-      path: '/orcamentos', 
-      icon: '💰', 
-      label: 'Orçamentos',
-      roles: ['admin', 'gerente'] 
-    },
-    { 
-      path: '/reclamacoes', 
-      icon: '📋', 
-      label: 'Reclamações',
-      roles: ['admin', 'gerente'] 
-    },
-    { 
-      path: '/usuarios', 
-      icon: '👥', 
-      label: 'Usuários',
-      roles: ['admin'] 
-    },
-    { 
-      path: '/metricas', 
-      icon: '📈', 
-      label: 'Métricas',
-      roles: ['admin', 'gerente'] 
-    },
-    { 
-      path: '/configuracoes', 
-      icon: '⚙️', 
-      label: 'Configurações',
-      roles: ['admin'] 
-    },
-  ], []);
+  { path: '/dashboard/farmacia', icon: '📊', label: 'Dashboard' },
+  { path: '/atendimento', icon: '💬', label: 'Atendimento' },
+  { 
+    path: '/pdv', 
+    icon: '🛒', 
+    label: 'PDV',
+    roles: ['admin', 'gerente', 'atendente'] 
+  },
+  { 
+    path: '/vendas', 
+    icon: '📋', 
+    label: 'Vendas',
+    roles: ['admin', 'gerente', 'atendente'] 
+  },
+  { 
+    path: '/produtos', 
+    icon: '📦', 
+    label: 'Produtos',
+    roles: ['admin', 'gerente', 'atendente'] 
+  },
+  { 
+    path: '/estoque', 
+    icon: '📦', 
+    label: 'Estoque',
+    roles: ['admin', 'gerente'] 
+  },
+  { 
+    path: '/orcamentos', 
+    icon: '💰', 
+    label: 'Orçamentos',
+    roles: ['admin', 'gerente'] 
+  },
+  { 
+    path: '/receitas', 
+    icon: '📋', 
+    label: 'Receitas',
+    roles: ['admin', 'gerente', 'atendente'] 
+  },
+  { 
+    path: '/reclamacoes', 
+    icon: '📋', 
+    label: 'Reclamações',
+    roles: ['admin', 'gerente'] 
+  },
+  { 
+    path: '/fornecedores', 
+    icon: '🏢', 
+    label: 'Fornecedores',
+    roles: ['admin', 'gerente'] 
+  },
+  { 
+    path: '/compras', 
+    icon: '📦', 
+    label: 'Compras',
+    roles: ['admin', 'gerente'] 
+  },
+  { 
+    path: '/financeiro', 
+    icon: '💰', 
+    label: 'Financeiro',
+    roles: ['admin', 'gerente'] 
+  },
+  { 
+    path: '/relatorios', 
+    icon: '📈', 
+    label: 'Relatórios',
+    roles: ['admin', 'gerente'] 
+  },
+  { 
+    path: '/usuarios', 
+    icon: '👥', 
+    label: 'Usuários',
+    roles: ['admin'] 
+  },
+  { 
+    path: '/configuracoes', 
+    icon: '⚙️', 
+    label: 'Configurações',
+    roles: ['admin'] 
+  },
+], []);
 
   useEffect(() => {
     const userStr = localStorage.getItem('user');

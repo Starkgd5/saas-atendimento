@@ -1,106 +1,102 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import socketService from '../services/socket';
+import SocketService from '../services/socket';
 
 export const useWebSocket = () => {
   const [isConnected, setIsConnected] = useState(false);
-  const [socketId, setSocketId] = useState<string | null>(null);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
-  const eventHandlersRef = useRef<Map<string, Set<Function>>>(new Map());
+  const isMounted = useRef(true);
 
   useEffect(() => {
+    isMounted.current = true;
+
     const connect = async () => {
       try {
-        const socket = await socketService.connect({
-          token: localStorage.getItem('token') || '',
-        });
-        setIsConnected(true);
-        setSocketId(socket.id || null);
+        const token = localStorage.getItem('token') || '';
+        await SocketService.connect(token);
+        if (isMounted.current) {
+          setIsConnected(true);
+        }
       } catch (error) {
         console.error('Erro ao conectar WebSocket:', error);
-        setIsConnected(false);
+        if (isMounted.current) {
+          setIsConnected(false);
+        }
       }
     };
 
     connect();
 
-    socketService.on('connect', () => {
-      setIsConnected(true);
-      setSocketId(socketService.getSocketId());
-    });
+    const handleConnect = () => {
+      if (isMounted.current) {
+        setIsConnected(true);
+        setReconnectAttempts(0);
+      }
+    };
 
-    socketService.on('disconnect', () => {
-      setIsConnected(false);
-      setSocketId(null);
-    });
+    const handleDisconnect = () => {
+      if (isMounted.current) {
+        setIsConnected(false);
+      }
+    };
 
-    socketService.on('reconnect_attempt', (data: { attemptNumber: number }) => {
-      setReconnectAttempts(data.attemptNumber);
-    });
+    const handleReconnectAttempt = (data: { attemptNumber: number }) => {
+      if (isMounted.current) {
+        setReconnectAttempts(data.attemptNumber);
+      }
+    };
+
+    SocketService.on('connect', handleConnect);
+    SocketService.on('disconnect', handleDisconnect);
+    SocketService.on('reconnect_attempt', handleReconnectAttempt);
 
     return () => {
-      socketService.disconnect();
-      socketService.clearAllListeners();
+      isMounted.current = false;
+      SocketService.off('connect', handleConnect);
+      SocketService.off('disconnect', handleDisconnect);
+      SocketService.off('reconnect_attempt', handleReconnectAttempt);
+      SocketService.disconnect();
+      // Remover chamada para clearAllListeners
     };
   }, []);
 
   const emit = useCallback((event: string, data: any) => {
-    return socketService.emit(event, data);
+    return SocketService.emit(event, data);
   }, []);
 
   const on = useCallback((event: string, callback: Function) => {
-    if (!eventHandlersRef.current.has(event)) {
-      eventHandlersRef.current.set(event, new Set());
-    }
-    eventHandlersRef.current.get(event)?.add(callback);
-    socketService.on(event, callback);
+    SocketService.on(event, callback);
   }, []);
 
   const off = useCallback((event: string, callback?: Function) => {
-    if (callback) {
-      const handlers = eventHandlersRef.current.get(event);
-      if (handlers) {
-        handlers.delete(callback);
-        if (handlers.size === 0) {
-          eventHandlersRef.current.delete(event);
-        }
-      }
-    } else {
-      eventHandlersRef.current.delete(event);
-    }
-    socketService.off(event, callback);
+    SocketService.off(event, callback);
   }, []);
 
   const once = useCallback((event: string, callback: Function) => {
-    const onceCallback = (data: any) => {
-      callback(data);
-      off(event, onceCallback);
-    };
-    on(event, onceCallback);
-  }, [on, off]);
+    SocketService.once(event, callback);
+  }, []);
 
   const sendMessage = useCallback((clienteId: number, mensagem: string, remetente: string = 'atendente') => {
-    return socketService.sendMessage(clienteId, mensagem, remetente);
+    return SocketService.sendMessage(clienteId, mensagem, remetente);
   }, []);
 
   const puxarCliente = useCallback(() => {
-    return socketService.puxarCliente();
+    return SocketService.puxarCliente();
   }, []);
 
   const finalizarAtendimento = useCallback((clienteId: number) => {
-    return socketService.finalizarAtendimento(clienteId);
+    return SocketService.finalizarAtendimento(clienteId);
   }, []);
 
   const sendTyping = useCallback((clienteId: number, isTyping: boolean) => {
-    return socketService.sendTyping(clienteId, isTyping);
-  }, []);
-
-  const reconnect = useCallback(() => {
-    socketService.reconnect();
+    return SocketService.emit('typing', {
+      cliente_id: clienteId,
+      is_typing: isTyping,
+      time: new Date().toISOString()
+    });
   }, []);
 
   return {
     isConnected,
-    socketId,
     reconnectAttempts,
     emit,
     on,
@@ -110,7 +106,6 @@ export const useWebSocket = () => {
     puxarCliente,
     finalizarAtendimento,
     sendTyping,
-    reconnect,
   };
 };
 

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { Button } from '../components/ui/Button';
-import { Card } from '../components/ui/Card';
+import Button from '../components/ui/Button';
+import Card from '../components/ui/Card';
 
 export const RelatoriosFarmacia: React.FC = () => {
   const [periodo, setPeriodo] = useState('mensal');
@@ -126,3 +126,5 @@ export const RelatoriosFarmacia: React.FC = () => {
     </div>
   );
 };
+
+export default RelatoriosFarmacia;

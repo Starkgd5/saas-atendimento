@@ -24,11 +24,8 @@ func (s *ProdutoService) CriarProduto(ctx context.Context, produto *models.Produ
 	if produto.Categoria == "" {
 		return fmt.Errorf("categoria é obrigatória")
 	}
-	if produto.Preco < 0 {
+	if produto.PrecoVenda < 0 {
 		return fmt.Errorf("preço não pode ser negativo")
-	}
-	if produto.Estoque < 0 {
-		return fmt.Errorf("estoque não pode ser negativo")
 	}
 	if produto.LojaID == 0 {
 		return fmt.Errorf("loja é obrigatória")
@@ -84,7 +81,7 @@ func (s *ProdutoService) AtualizarProduto(ctx context.Context, produto *models.P
 	if produto.Nome == "" {
 		return fmt.Errorf("nome é obrigatório")
 	}
-	if produto.Preco < 0 {
+	if produto.PrecoVenda < 0 {
 		return fmt.Errorf("preço não pode ser negativo")
 	}
 
@@ -111,43 +108,10 @@ func (s *ProdutoService) AtualizarProduto(ctx context.Context, produto *models.P
 	return s.repo.AtualizarProduto(produto)
 }
 
-// AtualizarEstoque atualiza o estoque de um produto
-func (s *ProdutoService) AtualizarEstoque(ctx context.Context, id, lojaID int, quantidade int) error {
-	if id <= 0 {
-		return fmt.Errorf("ID inválido")
-	}
-	if quantidade == 0 {
-		return nil // Sem alteração
-	}
-
-	// Verificar se produto existe
-	exists, err := s.repo.ProdutoExiste(id, lojaID)
-	if err != nil {
-		return fmt.Errorf("erro ao verificar produto: %w", err)
-	}
-	if !exists {
-		return fmt.Errorf("produto não encontrado")
-	}
-
-	return s.repo.AtualizarEstoque(id, lojaID, quantidade)
-}
-
 // DeletarProduto deleta um produto
-func (s *ProdutoService) DeletarProduto(ctx context.Context, id, lojaID int) error {
-	if id <= 0 {
-		return fmt.Errorf("ID inválido")
-	}
-	return s.repo.DeletarProduto(id, lojaID)
-}
-
-// VerificarEstoque verifica se há estoque suficiente
-func (s *ProdutoService) VerificarEstoque(ctx context.Context, id, lojaID int, quantidade int) (bool, error) {
-	produto, err := s.repo.BuscarProdutoPorID(id, lojaID)
-	if err != nil {
-		return false, err
-	}
-	if produto == nil {
-		return false, fmt.Errorf("produto não encontrado")
-	}
-	return produto.Estoque >= quantidade, nil
-}
+// func (s *ProdutoService) DeletarProduto(ctx context.Context, id, lojaID int) error {
+// 	if id <= 0 {
+// 		return fmt.Errorf("ID inválido")
+// 	}
+// 	return s.repo.DeletarProduto(id, lojaID)
+// }

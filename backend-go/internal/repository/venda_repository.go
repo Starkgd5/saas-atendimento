@@ -39,8 +39,22 @@ func (r *VendaRepository) CriarVenda(venda *models.Venda) error {
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
+	var clienteID interface{}
+	if venda.ClienteID != nil {
+		clienteID = *venda.ClienteID
+	} else {
+		clienteID = nil
+	}
+
+	var farmaceuticoID interface{}
+	if venda.FarmaceuticoID != nil {
+		farmaceuticoID = *venda.FarmaceuticoID
+	} else {
+		farmaceuticoID = nil
+	}
+
 	result, err := tx.Exec(query,
-		venda.LojaID, venda.ClienteID, venda.AtendenteID, venda.FarmaceuticoID,
+		venda.LojaID, clienteID, venda.AtendenteID, farmaceuticoID,
 		venda.NumeroVenda, venda.TipoPagamento, "Pendente",
 		venda.Subtotal, venda.Desconto, venda.Total,
 		venda.ReceitaAnexada, venda.Observacao,
@@ -56,6 +70,16 @@ func (r *VendaRepository) CriarVenda(venda *models.Venda) error {
 	venda.ID = int(id)
 	venda.CreatedAt = time.Now()
 	venda.UpdatedAt = time.Now()
+
+	// Inserir itens da venda
+	if venda.Itens != nil && len(venda.Itens) > 0 {
+		for i := range venda.Itens {
+			venda.Itens[i].VendaID = venda.ID
+			if err := r.criarItemVenda(tx, &venda.Itens[i]); err != nil {
+				return fmt.Errorf("erro ao criar item da venda: %w", err)
+			}
+		}
+	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("erro ao commit transação: %w", err)
@@ -92,7 +116,7 @@ func (r *VendaRepository) criarItemVenda(tx *sql.Tx, item *models.ItemVenda) err
 func (r *VendaRepository) gerarNumeroVenda() (string, error) {
 	var count int
 	err := r.db.QueryRow(`
-		SELECT COUNT(*) + 1 FROM vendas WHERE DATE(created_at) = CURDATE()
+		SELECT COALESCE(COUNT(*) + 1, 1) FROM vendas WHERE DATE(created_at) = CURDATE()
 	`).Scan(&count)
 	if err != nil && err != sql.ErrNoRows {
 		return "", err
@@ -122,7 +146,10 @@ func (r *VendaRepository) BuscarVendaPorID(id int) (*models.Venda, error) {
 		&venda.ReceitaAnexada, &venda.Observacao, &venda.CreatedAt, &venda.UpdatedAt,
 	)
 	if err != nil {
-		return nil, err
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("erro ao buscar venda: %w", err)
 	}
 
 	if clienteID.Valid {
@@ -133,6 +160,13 @@ func (r *VendaRepository) BuscarVendaPorID(id int) (*models.Venda, error) {
 		id := int(farmaceuticoID.Int64)
 		venda.FarmaceuticoID = &id
 	}
+
+	// Buscar itens da venda
+	itens, err := r.BuscarItensVenda(id)
+	if err != nil {
+		return nil, err
+	}
+	venda.Itens = itens
 
 	return &venda, nil
 }

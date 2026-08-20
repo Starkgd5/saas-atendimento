@@ -15,16 +15,9 @@ import (
 // ============================================
 
 const (
-	// Tempo máximo para escrever uma mensagem
-	writeWait = 10 * time.Second
-
-	// Tempo máximo para ler uma mensagem
-	pongWait = 60 * time.Second
-
-	// Enviar ping a cada 45 segundos
-	pingPeriod = (pongWait * 9) / 10
-
-	// Tamanho máximo da mensagem
+	writeWait      = 10 * time.Second
+	pongWait       = 60 * time.Second
+	pingPeriod     = (pongWait * 9) / 10
 	maxMessageSize = 512 * 1024 // 512KB
 )
 
@@ -130,7 +123,6 @@ func (m *Manager) registerClient(client *Client) {
 	m.clients[client] = true
 	m.clientsByUser[client.userID] = client
 
-	// Adicionar à sala da loja
 	roomName := m.getRoomName(client.lojaID)
 	if m.rooms[roomName] == nil {
 		m.rooms[roomName] = make(map[*Client]bool)
@@ -148,7 +140,6 @@ func (m *Manager) unregisterClient(client *Client) {
 		delete(m.clients, client)
 		delete(m.clientsByUser, client.userID)
 
-		// Remover da sala
 		roomName := m.getRoomName(client.lojaID)
 		if room, ok := m.rooms[roomName]; ok {
 			delete(room, client)
@@ -170,7 +161,6 @@ func (m *Manager) broadcastMessage(message []byte) {
 		select {
 		case client.send <- message:
 		default:
-			// Cliente pode estar desconectado
 			go m.unregisterClient(client)
 		}
 	}
@@ -192,13 +182,11 @@ func (m *Manager) pingClients() {
 // MÉTODOS PÚBLICOS
 // ============================================
 
-// EnviarParaClientes envia mensagem para todos os clientes de uma loja
 func (m *Manager) EnviarParaClientes(lojaID int, message []byte) {
 	roomName := m.getRoomName(lojaID)
 	m.EnviarParaSala(roomName, message)
 }
 
-// EnviarParaSala envia mensagem para todos os clientes de uma sala
 func (m *Manager) EnviarParaSala(room string, message []byte) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -214,7 +202,6 @@ func (m *Manager) EnviarParaSala(room string, message []byte) {
 	}
 }
 
-// EnviarParaUsuario envia mensagem para um usuário específico
 func (m *Manager) EnviarParaUsuario(userID int, message []byte) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -228,19 +215,16 @@ func (m *Manager) EnviarParaUsuario(userID int, message []byte) {
 	}
 }
 
-// EnviarParaTodos envia mensagem para todos os clientes conectados
 func (m *Manager) EnviarParaTodos(message []byte) {
 	m.broadcast <- message
 }
 
-// GetClientesConectados retorna o número de clientes conectados
 func (m *Manager) GetClientesConectados() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.clients)
 }
 
-// GetClientesPorLoja retorna o número de clientes conectados em uma loja
 func (m *Manager) GetClientesPorLoja(lojaID int) int {
 	roomName := m.getRoomName(lojaID)
 	m.mu.RLock()
@@ -252,7 +236,6 @@ func (m *Manager) GetClientesPorLoja(lojaID int) int {
 	return 0
 }
 
-// GetClientesConectadosDetalhes retorna detalhes dos clientes conectados
 func (m *Manager) GetClientesConectadosDetalhes() map[string]interface{} {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -267,7 +250,7 @@ func (m *Manager) GetClientesConectadosDetalhes() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"total":   len(clients),
+		"total":    len(clients),
 		"clientes": clients,
 	}
 }
@@ -285,13 +268,15 @@ func (m *Manager) getRoomName(lojaID int) string {
 // ============================================
 
 func (m *Manager) ServeWS(w http.ResponseWriter, r *http.Request, userID, lojaID int) {
+	// Atualizar o upgrader para permitir todas as origens
+	m.upgrader.CheckOrigin = func(r *http.Request) bool { return true }
+	
 	conn, err := m.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("❌ Erro ao upgrade WebSocket:", err)
 		return
 	}
 
-	// Extrair role do query param ou header
 	role := r.URL.Query().Get("role")
 	if role == "" {
 		role = "atendente"
@@ -340,7 +325,6 @@ func (c *Client) writePump() {
 			}
 			w.Write(message)
 
-			// Adicionar mensagens enfileiradas no mesmo write
 			n := len(c.send)
 			for i := 0; i < n; i++ {
 				w.Write([]byte{'\n'})
@@ -384,7 +368,6 @@ func (c *Client) readPump() {
 			break
 		}
 
-		// Processar mensagem recebida
 		c.manager.handleMessage(msg, c)
 	}
 }
@@ -396,11 +379,12 @@ func (c *Client) readPump() {
 func (m *Manager) handleMessage(msg Message, client *Client) {
 	switch msg.Type {
 	case "nova_mensagem":
-		// Reenviar para todos os clientes da mesma loja
-		m.EnviarParaClientes(client.lojaID, []byte(msg.Payload))
+		// Verificar se o payload é válido
+		if len(msg.Payload) > 0 {
+			m.EnviarParaClientes(client.lojaID, msg.Payload)
+		}
 
 	case "puxar_cliente":
-		// Solicitação para puxar próximo da fila
 		response, _ := json.Marshal(map[string]interface{}{
 			"type":    "fila_atualizada",
 			"payload": map[string]interface{}{"action": "puxar_cliente"},
@@ -408,7 +392,6 @@ func (m *Manager) handleMessage(msg Message, client *Client) {
 		m.EnviarParaClientes(client.lojaID, response)
 
 	case "finalizar_atendimento":
-		// Finalizar atendimento atual
 		response, _ := json.Marshal(map[string]interface{}{
 			"type":    "atendimento_finalizado",
 			"payload": map[string]interface{}{"cliente_id": msg.Payload},
@@ -416,7 +399,6 @@ func (m *Manager) handleMessage(msg Message, client *Client) {
 		m.EnviarParaClientes(client.lojaID, response)
 
 	case "ping":
-		// Responder com pong
 		response, _ := json.Marshal(map[string]interface{}{
 			"type": "pong",
 			"time": time.Now(),
@@ -424,7 +406,6 @@ func (m *Manager) handleMessage(msg Message, client *Client) {
 		client.send <- response
 
 	case "join_room":
-		// Entrar em uma sala específica
 		if msg.Room != "" {
 			m.mu.Lock()
 			if m.rooms[msg.Room] == nil {
@@ -435,7 +416,6 @@ func (m *Manager) handleMessage(msg Message, client *Client) {
 		}
 
 	case "leave_room":
-		// Sair de uma sala
 		if msg.Room != "" {
 			m.mu.Lock()
 			if room, ok := m.rooms[msg.Room]; ok {
@@ -448,7 +428,6 @@ func (m *Manager) handleMessage(msg Message, client *Client) {
 		}
 
 	default:
-		// Mensagem desconhecida
 		log.Printf("Mensagem desconhecida do cliente %d: %s", client.userID, msg.Type)
 	}
 }
@@ -457,12 +436,10 @@ func (m *Manager) handleMessage(msg Message, client *Client) {
 // MÉTODOS DE CONFIGURAÇÃO
 // ============================================
 
-// SetPingInterval define o intervalo de ping
 func (m *Manager) SetPingInterval(interval time.Duration) {
 	m.pingInterval = interval
 }
 
-// SetCheckOrigin define a função de verificação de origem
 func (m *Manager) SetCheckOrigin(checkOrigin func(r *http.Request) bool) {
 	m.upgrader.CheckOrigin = checkOrigin
 }

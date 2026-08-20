@@ -224,3 +224,5 @@ export const PDV: React.FC = () => {
     </div>
   );
 };
+
+export default PDV;

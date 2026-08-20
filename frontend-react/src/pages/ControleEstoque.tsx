@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Input } from '../components/ui/Input';
-import { Button } from '../components/ui/Button';
-import { Modal } from '../components/ui/Modal';
-import { Table } from '../components/ui/Table';
+import Input from '../components/ui/Input';
+import Button from '../components/ui/Button';
+import Modal from '../components/ui/Modal';
+// import Table from '../components/ui/Table';
 
 interface ProdutoEstoque {
   id: number;
@@ -180,3 +180,5 @@ export const ControleEstoque: React.FC = () => {
     </div>
   );
 };
+
+export default ControleEstoque;

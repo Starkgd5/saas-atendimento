@@ -9,16 +9,23 @@ import (
 )
 
 type OrcamentoService struct {
-	repo          *repository.OrcamentoRepository
-	produtoRepo   *repository.ProdutoRepository
-	clienteRepo   *repository.ClienteRepository
+	repo        *repository.OrcamentoRepository
+	produtoRepo *repository.ProdutoRepository
+	clienteRepo *repository.ClienteRepository
+	loteRepo    *repository.LoteRepository
 }
 
-func NewOrcamentoService(repo *repository.OrcamentoRepository, produtoRepo *repository.ProdutoRepository, clienteRepo *repository.ClienteRepository) *OrcamentoService {
+func NewOrcamentoService(
+	repo *repository.OrcamentoRepository,
+	produtoRepo *repository.ProdutoRepository,
+	clienteRepo *repository.ClienteRepository,
+	loteRepo *repository.LoteRepository,
+) *OrcamentoService {
 	return &OrcamentoService{
 		repo:        repo,
 		produtoRepo: produtoRepo,
 		clienteRepo: clienteRepo,
+		loteRepo:    loteRepo,
 	}
 }
 
@@ -57,19 +64,31 @@ func (s *OrcamentoService) CriarOrcamento(ctx context.Context, orcamento *models
 		if !produto.Ativo {
 			return fmt.Errorf("produto %s está inativo", produto.Nome)
 		}
-		if produto.Estoque < item.Quantidade {
-			return fmt.Errorf("estoque insuficiente para %s (disponível: %d)", produto.Nome, produto.Estoque)
+
+		// Verificar estoque via lotes
+		lotes, err := s.loteRepo.BuscarLotesValidos(item.ProdutoID, orcamento.LojaID)
+		if err != nil {
+			return fmt.Errorf("erro ao verificar estoque: %w", err)
+		}
+
+		estoqueTotal := 0
+		for _, l := range lotes {
+			estoqueTotal += l.Quantidade
+		}
+
+		if estoqueTotal < item.Quantidade {
+			return fmt.Errorf("estoque insuficiente para %s (disponível: %d)", produto.Nome, estoqueTotal)
 		}
 
 		item.ProdutoNome = produto.Nome
-		item.PrecoUnit = produto.Preco
-		item.Total = produto.Preco * float64(item.Quantidade)
+		item.PrecoUnit = produto.PrecoVenda // Usando PrecoVenda
+		item.Total = produto.PrecoVenda * float64(item.Quantidade)
 		total += item.Total
 	}
 
 	orcamento.Total = total
 	orcamento.TotalComDesconto = total - orcamento.Desconto
-	orcamento.Status = models.OrcamentoPendente
+	orcamento.Status = "pendente"
 
 	// Salvar orçamento
 	if err := s.repo.CriarOrcamento(orcamento); err != nil {
@@ -118,7 +137,7 @@ func (s *OrcamentoService) AtualizarOrcamento(ctx context.Context, orcamento *mo
 		return fmt.Errorf("orçamento não encontrado")
 	}
 
-	if existing.Status != models.OrcamentoPendente {
+	if existing.Status != "pendente" {
 		return fmt.Errorf("orçamento não pode ser alterado (status: %s)", existing.Status)
 	}
 
@@ -140,7 +159,7 @@ func (s *OrcamentoService) AprovarOrcamento(ctx context.Context, id, lojaID int)
 		return fmt.Errorf("orçamento não encontrado")
 	}
 
-	if orcamento.Status != models.OrcamentoPendente {
+	if orcamento.Status != "pendente" {
 		return fmt.Errorf("orçamento não pode ser aprovado (status: %s)", orcamento.Status)
 	}
 
@@ -161,18 +180,12 @@ func (s *OrcamentoService) RejeitarOrcamento(ctx context.Context, id, lojaID int
 		return fmt.Errorf("orçamento não encontrado")
 	}
 
-	if orcamento.Status != models.OrcamentoPendente {
+	if orcamento.Status != "pendente" {
 		return fmt.Errorf("orçamento não pode ser rejeitado (status: %s)", orcamento.Status)
 	}
 
 	orcamento.Observacao = motivo
 	return s.repo.RejeitarOrcamento(id, lojaID)
-}
-
-// ExpirarOrcamentosExpirados expira orçamentos pendentes com mais de 7 dias
-func (s *OrcamentoService) ExpirarOrcamentosExpirados(ctx context.Context) error {
-	// TODO: Implementar expiração em lote
-	return nil
 }
 
 // GetMetricasOrcamento retorna métricas de orçamentos
@@ -182,17 +195,17 @@ func (s *OrcamentoService) GetMetricasOrcamento(ctx context.Context, lojaID int)
 		return nil, err
 	}
 
-	aprovados, err := s.repo.ContarOrcamentosPorStatus(lojaID, models.OrcamentoAprovado)
+	aprovados, err := s.repo.ContarOrcamentosPorStatus(lojaID, "aprovado")
 	if err != nil {
 		return nil, err
 	}
 
-	pendentes, err := s.repo.ContarOrcamentosPorStatus(lojaID, models.OrcamentoPendente)
+	pendentes, err := s.repo.ContarOrcamentosPorStatus(lojaID, "pendente")
 	if err != nil {
 		return nil, err
 	}
 
-	rejeitados, err := s.repo.ContarOrcamentosPorStatus(lojaID, models.OrcamentoRejeitado)
+	rejeitados, err := s.repo.ContarOrcamentosPorStatus(lojaID, "rejeitado")
 	if err != nil {
 		return nil, err
 	}

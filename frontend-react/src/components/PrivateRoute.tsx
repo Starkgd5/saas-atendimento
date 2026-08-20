@@ -20,18 +20,17 @@ const PrivateRoute: React.FC<PrivateRouteProps> = ({
   children,
   requiredRole,
   allowedRoles,
-  redirectTo = '/dashboard'
+  redirectTo = '/login'
 }) => {
   const location = useLocation();
   const token = localStorage.getItem('token');
   const userStr = localStorage.getItem('user');
 
-  // Verificar se está autenticado
+  // Verificar autenticação
   if (!token) {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
-  // Tentar fazer parse do usuário
   let user: User | null = null;
   try {
     user = userStr ? JSON.parse(userStr) : null;
@@ -42,44 +41,32 @@ const PrivateRoute: React.FC<PrivateRouteProps> = ({
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
-  // Se não tiver usuário, redirecionar para login
   if (!user) {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
-  // Verificar role específica (requiredRole)
+  // Verificar role específica
   if (requiredRole && user.role !== requiredRole) {
-    return <Navigate to={redirectTo} replace />;
+    return <Navigate to="/dashboard/farmacia" replace />;
   }
 
-  // Verificar roles permitidas (allowedRoles)
+  // Verificar roles permitidas
   if (allowedRoles && allowedRoles.length > 0) {
     if (!allowedRoles.includes(user.role)) {
-      return <Navigate to={redirectTo} replace />;
+      return <Navigate to="/dashboard/farmacia" replace />;
     }
   }
 
-  // Verificar se o usuário está ativo (role = admin não precisa de loja)
-  if (user.role !== 'admin' && !user.loja_id) {
-    console.warn('Usuário sem loja associada');
-    // Pode redirecionar para uma página de erro ou continuar
+  // Se o usuário for atendente e tentar acessar rotas admin/gerente
+  if (user.role === 'atendente') {
+    const adminRoutes = ['/usuarios', '/configuracoes', '/relatorios', '/financeiro'];
+    const currentPath = location.pathname;
+    if (adminRoutes.some(route => currentPath.startsWith(route))) {
+      return <Navigate to="/dashboard/farmacia" replace />;
+    }
   }
 
   return <>{children}</>;
-};
-
-// HOC para proteger rotas com roles
-export const withAuth = (
-  Component: React.ComponentType,
-  options?: Omit<PrivateRouteProps, 'children'>
-) => {
-  return function AuthenticatedComponent(props: any) {
-    return (
-      <PrivateRoute {...options}>
-        <Component {...props} />
-      </PrivateRoute>
-    );
-  };
 };
 
 // Hook para verificar autenticação

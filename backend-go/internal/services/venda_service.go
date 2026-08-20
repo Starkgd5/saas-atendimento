@@ -42,7 +42,7 @@ func (s *VendaService) ProcessarVenda(ctx context.Context, venda *models.Venda, 
 	}
 
 	// 2. Validar estoque para cada item
-	for _, item := range itens {
+	for i, item := range itens {
 		// Buscar produto
 		produto, err := s.produtoRepo.BuscarProdutoPorID(item.ProdutoID, venda.LojaID)
 		if err != nil {
@@ -80,24 +80,22 @@ func (s *VendaService) ProcessarVenda(ctx context.Context, venda *models.Venda, 
 		if produto.RequereReceita && !venda.ReceitaAnexada {
 			return nil, fmt.Errorf("produto %s requer receita médica", produto.Nome)
 		}
+
+		// Atualizar preço do item
+		itens[i].PrecoUnit = produto.PrecoVenda
+		itens[i].Total = produto.PrecoVenda * float64(item.Quantidade)
 	}
 
 	// 3. Calcular subtotal e total
 	var subtotal float64
 	for _, item := range itens {
-		// Buscar preço do produto
-		produto, err := s.produtoRepo.BuscarProdutoPorID(item.ProdutoID, venda.LojaID)
-		if err != nil {
-			return nil, err
-		}
-		item.PrecoUnit = produto.PrecoVenda
-		item.Total = item.PrecoUnit * float64(item.Quantidade)
 		subtotal += item.Total
 	}
 
 	venda.Subtotal = subtotal
 	venda.Total = subtotal - venda.Desconto
 	venda.AtendenteID = usuarioID
+	venda.Itens = itens // ← Adicionar itens à venda
 
 	// 4. Criar venda no banco
 	if err := s.vendaRepo.CriarVenda(venda); err != nil {
@@ -201,9 +199,9 @@ func (s *VendaService) RelatorioVendasDiarias(ctx context.Context, lojaID int, d
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT 
-			COUNT(*) as total_vendas,
-			COALESCE(SUM(total), 0) as valor_total,
-			COALESCE(SUM(quantidade), 0) as total_itens
+			COUNT(DISTINCT v.id) as total_vendas,
+			COALESCE(SUM(v.total), 0) as valor_total,
+			COALESCE(SUM(iv.quantidade), 0) as total_itens
 		FROM vendas v
 		JOIN itens_venda iv ON v.id = iv.venda_id
 		WHERE v.loja_id = ? AND DATE(v.created_at) = ?
