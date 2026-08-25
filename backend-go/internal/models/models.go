@@ -97,32 +97,64 @@ type MovimentoCaixa struct {
 
 // Atendimento representa uma sessão de atendimento
 type Atendimento struct {
-	ID           int        `json:"id"`
-	ClienteID    int        `json:"cliente_id"`
-	LojaID       int        `json:"loja_id"`
-	Status       string     `json:"status"` // aguardando, em_atendimento, finalizado, abandonado
-	IniciadoEm   time.Time  `json:"iniciado_em"`
-	FinalizadoEm *time.Time `json:"finalizado_em,omitempty"`
-	AtendenteID  *int       `json:"atendente_id,omitempty"`
-	Cliente      *Cliente   `json:"cliente,omitempty"`
+	ID              int        `json:"id"`
+	ClienteID       int        `json:"cliente_id"`
+	LojaID          int        `json:"loja_id"`
+	AtendenteID     *int       `json:"atendente_id,omitempty"`
+	Status          string     `json:"status"` // aguardando, em_atendimento, finalizado, abandonado
+	IniciadoEm      time.Time  `json:"iniciado_em"`
+	FinalizadoEm    *time.Time `json:"finalizado_em,omitempty"`
+	TempoEspera     *int       `json:"tempo_espera,omitempty"` // em segundos
+	TempoAtendimento *int      `json:"tempo_atendimento,omitempty"` // em segundos
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	
+	// Relacionamentos
+	Cliente         *Cliente   `json:"cliente,omitempty"`
+	Atendente       *Usuario   `json:"atendente,omitempty"`
+	Mensagens       []Mensagem `json:"mensagens,omitempty"`
 }
-
-// ============================================
-// MENSAGEM
-// ============================================
 
 // Mensagem representa uma mensagem trocada no chat
 type Mensagem struct {
-	ID             int       `json:"id"`
-	AtendimentoID  int       `json:"atendimento_id"`
-	Remetente      string    `json:"remetente"` // cliente, atendente, ia
-	Conteudo       string    `json:"conteudo"`
-	Tipo           string    `json:"tipo"` // texto, imagem, documento, audio
-	ArquivoURL     string    `json:"arquivo_url,omitempty"`
-	ArquivoNome    string    `json:"arquivo_nome,omitempty"`
-	ArquivoTamanho int64     `json:"arquivo_tamanho,omitempty"`
-	EnviadoEm      time.Time `json:"enviado_em"`
-	Lida           bool      `json:"lida"`
+	ID            int       `json:"id"`
+	AtendimentoID int       `json:"atendimento_id"`
+	Remetente     string    `json:"remetente"` // cliente, atendente, ia, sistema
+	Conteudo      string    `json:"conteudo"`
+	Tipo          string    `json:"tipo"` // texto, imagem, documento, audio
+	ArquivoURL    string    `json:"arquivo_url,omitempty"`
+	ArquivoNome   string    `json:"arquivo_nome,omitempty"`
+	ArquivoTamanho int64    `json:"arquivo_tamanho,omitempty"`
+	Lida          bool      `json:"lida"`
+	EnviadoEm     time.Time `json:"enviado_em"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// AtendimentoResumo representa um resumo do atendimento para listagem
+type AtendimentoResumo struct {
+	ID           int       `json:"id"`
+	ClienteID    int       `json:"cliente_id"`
+	ClienteNome  string    `json:"cliente_nome"`
+	ClienteTelefone string `json:"cliente_telefone"`
+	Status       string    `json:"status"`
+	IniciadoEm   time.Time `json:"iniciado_em"`
+	TempoDecorrido int     `json:"tempo_decorrido"` // em segundos
+	UltimaMensagem string  `json:"ultima_mensagem,omitempty"`
+	UltimaMensagemEm *time.Time `json:"ultima_mensagem_em,omitempty"`
+}
+
+// AtendimentoStats representa estatísticas de atendimentos
+type AtendimentoStats struct {
+	TotalAtendimentos  int     `json:"total_atendimentos"`
+	EmAtendimento      int     `json:"em_atendimento"`
+	Aguardando         int     `json:"aguardando"`
+	Finalizados        int     `json:"finalizados"`
+	Abandonados        int     `json:"abandonados"`
+	TempoMedioEspera   float64 `json:"tempo_medio_espera"` // em segundos
+	TempoMedioAtendimento float64 `json:"tempo_medio_atendimento"` // em segundos
+	TicketMedio        float64 `json:"ticket_medio"`
+	TaxaConversao      float64 `json:"taxa_conversao"`
 }
 
 // ============================================
@@ -313,34 +345,36 @@ type ItemVenda struct {
 
 // ReceitaMedica representa uma receita médica (RDC 527/2021)
 type ReceitaMedica struct {
-	ID             int        `json:"id"`
-	ClienteID      int        `json:"cliente_id"`
-	VendaID        *int       `json:"venda_id"`
-	NumeroReceita  string     `json:"numero_receita"`
-	DataEmissao    time.Time  `json:"data_emissao"`
-	DataValidade   time.Time  `json:"data_validade"`
-	MedicoNome     string     `json:"medico_nome"`
-	MedicoCRM      string     `json:"medico_crm"`
-	MedicoUF       string     `json:"medico_uf"`
-	Cid            string     `json:"cid"`    // Classificação Internacional de Doenças
-	Status         string     `json:"status"` // Pendente, Validada, Rejeitada, Expirada
-	DataValidacao  *time.Time `json:"data_validacao"`
-	FarmaceuticoID int        `json:"farmaceutico_id"`
-	Observacao     string     `json:"observacao"`
-	ArquivoURL     string     `json:"arquivo_url"` // URL da imagem da receita
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ID              int       `json:"id"`
+	ClienteID       int       `json:"cliente_id"`
+	LojaID          int       `json:"loja_id"`
+	VendaID         *int      `json:"venda_id,omitempty"`
+	NumeroReceita   string    `json:"numero_receita"`
+	DataEmissao     time.Time `json:"data_emissao"`
+	DataValidade    time.Time `json:"data_validade"`
+	MedicoNome      string    `json:"medico_nome"`
+	MedicoCRM       string    `json:"medico_crm"`
+	MedicoUF        string    `json:"medico_uf"`
+	Cid             string    `json:"cid"`
+	Status          string    `json:"status"` // Pendente, Validada, Rejeitada, Expirada
+	DataValidacao   *time.Time `json:"data_validacao,omitempty"`
+	FarmaceuticoID  *int      `json:"farmaceutico_id,omitempty"`
+	Observacao      string    `json:"observacao"`
+	ArquivoURL      string    `json:"arquivo_url"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	Cliente         *Cliente  `json:"cliente,omitempty"`
 }
 
 // ItemReceita representa um item de uma receita
 type ItemReceita struct {
-	ID         int    `json:"id"`
-	ReceitaID  int    `json:"receita_id"`
-	ProdutoID  int    `json:"produto_id"`
-	Quantidade int    `json:"quantidade"`
-	Posologia  string `json:"posologia"`
-	Duracao    string `json:"duracao"`
-	Observacao string `json:"observacao"`
+	ID          int    `json:"id"`
+	ReceitaID   int    `json:"receita_id"`
+	ProdutoID   int    `json:"produto_id"`
+	Quantidade  int    `json:"quantidade"`
+	Posologia   string `json:"posologia"`
+	Duracao     string `json:"duracao"`
+	Observacao  string `json:"observacao"`
 }
 
 // Fornecedor representa um fornecedor
@@ -375,14 +409,27 @@ type Compra struct {
 	FornecedorID    int       `json:"fornecedor_id"`
 	NumeroNF        string    `json:"numero_nf"`
 	DataEmissao     time.Time `json:"data_emissao"`
-	DataRecebimento time.Time `json:"data_recebimento"`
-	Status          string    `json:"status"` // Em andamento, Recebido, Cancelado
+	DataRecebimento *time.Time `json:"data_recebimento,omitempty"`
+	Status          string    `json:"status"` // Em Andamento, Recebido, Cancelado
 	Subtotal        float64   `json:"subtotal"`
 	Desconto        float64   `json:"desconto"`
 	Total           float64   `json:"total"`
 	Observacao      string    `json:"observacao"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
+	Itens           []ItemCompra `json:"itens,omitempty"`
+	Fornecedor      *Fornecedor  `json:"fornecedor,omitempty"`
+}
+
+// ItemCompra representa um item da compra
+type ItemCompra struct {
+	ID          int     `json:"id"`
+	CompraID    int     `json:"compra_id"`
+	ProdutoID   int     `json:"produto_id"`
+	Quantidade  int     `json:"quantidade"`
+	PrecoUnit   float64 `json:"preco_unit"`
+	Total       float64 `json:"total"`
+	Produto     *Produto `json:"produto,omitempty"`
 }
 
 // ============================================
@@ -435,6 +482,49 @@ type ProdutoVendido struct {
 	Nome       string  `json:"nome"`
 	Quantidade int     `json:"quantidade"`
 	Total      float64 `json:"total"`
+}
+
+// Configuracao representa uma configuração do sistema
+type Configuracao struct {
+	ID        int       `json:"id"`
+	LojaID    int       `json:"loja_id"`
+	Chave     string    `json:"chave"`
+	Valor     string    `json:"valor"`
+	Descricao string    `json:"descricao"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// ContaReceber representa uma conta a receber
+type ContaReceber struct {
+	ID            int        `json:"id"`
+	LojaID        int        `json:"loja_id"`
+	ClienteID     *int       `json:"cliente_id,omitempty"`
+	VendaID       *int       `json:"venda_id,omitempty"`
+	Descricao     string     `json:"descricao"`
+	Valor         float64    `json:"valor"`
+	DataVencimento time.Time `json:"data_vencimento"`
+	DataPagamento *time.Time `json:"data_pagamento,omitempty"`
+	Status        string     `json:"status"` // Pendente, Pago, Vencido
+	Observacao    string     `json:"observacao"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+// ContaPagar representa uma conta a pagar
+type ContaPagar struct {
+	ID            int        `json:"id"`
+	LojaID        int        `json:"loja_id"`
+	FornecedorID  *int       `json:"fornecedor_id,omitempty"`
+	CompraID      *int       `json:"compra_id,omitempty"`
+	Descricao     string     `json:"descricao"`
+	Valor         float64    `json:"valor"`
+	DataVencimento time.Time `json:"data_vencimento"`
+	DataPagamento *time.Time `json:"data_pagamento,omitempty"`
+	Status        string     `json:"status"` // Pendente, Pago, Vencido
+	Observacao    string     `json:"observacao"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 // ============================================
@@ -544,9 +634,9 @@ const (
 
 // Prioridade de Reclamação
 const (
-	PrioridadeBaixa   = "baixa"
-	PrioridadeMedia   = "media"
-	PrioridadeAlta    = "alta"
+	PrioridadeBaixa  = "baixa"
+	PrioridadeMedia  = "media"
+	PrioridadeAlta   = "alta"
 	PrioridadeCritica = "critica"
 )
 

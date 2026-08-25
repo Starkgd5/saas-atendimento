@@ -1,40 +1,30 @@
-import json
 import logging
-import os
-import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, status
+from app.cache_service import cache_service
+from app.config import config
+from app.db_service import db_service
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 
 # ============================================
-# CONFIGURAÇÃO
-# ============================================
-
-LOG_LEVEL = os.getenv("LOG_LEVEL", "info")
-LOG_FORMAT = os.getenv("LOG_FORMAT", "json")
-LIMITE_ORCAMENTO_AUTO = float(os.getenv("LIMITE_ORCAMENTO_AUTO", "500.00"))
-MODEL_PATH = os.getenv("MODEL_PATH", "/models/llama-2-7b.Q4_K_M.gguf")
-
-# ============================================
-# LOGGING
+# CONFIGURAÇÃO DE LOGGING
 # ============================================
 
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL.upper()),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=getattr(logging, config.LOG_LEVEL.upper()),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
 # ============================================
-# MODELOS
+# MODELOS PYDANTIC
 # ============================================
 
 
@@ -42,121 +32,20 @@ class OrcamentoRequest(BaseModel):
     cliente_id: int = Field(..., description="ID do cliente")
     loja_id: int = Field(..., description="ID da loja")
     mensagem: str = Field(..., description="Mensagem do cliente", min_length=1)
-    historico: Optional[List[str]] = Field(default=[], description="Histórico da conversa")
-    produtos: Optional[List[str]] = Field(default=[], description="Lista de produtos específicos")
+    historico: list[str] | None = Field(default=[], description="Histórico da conversa")
+    produtos: list[str] | None = Field(
+        default=[], description="Lista de produtos específicos"
+    )
 
 
 class OrcamentoResponse(BaseModel):
-    orcamento: Optional[Dict[str, Any]] = None
+    orcamento: dict[str, Any] | None = None
     precisa_humano: bool = False
-    motivo: Optional[str] = None
+    motivo: str | None = None
     resposta_ia: str
-    produtos: Optional[List[Dict[str, Any]]] = None
+    produtos: list[dict[str, Any]] | None = None
     tempo_processamento: float = 0.0
 
-
-class Produto(BaseModel):
-    id: Optional[int] = None
-    nome: str
-    preco: float
-    categoria: str
-    quantidade: Optional[int] = 1
-
-
-class IAStatusResponse(BaseModel):
-    status: str
-    service: str
-    version: str
-    produtos_disponiveis: int
-    limite_orcamento_auto: float
-    timestamp: str
-    uptime: float
-
-
-class HealthResponse(BaseModel):
-    status: str
-    service: str
-    timestamp: str
-    uptime: float
-    version: str
-
-# ============================================
-# BASE DE DADOS DE PRODUTOS
-# ============================================
-
-
-PRODUTOS = {
-    "dipirona": {
-        "id": 1,
-        "nome": "Dipirona Sódica 500mg",
-        "preco": 15.90,
-        "categoria": "Analgésico",
-        "descricao": "Analgésico e antitérmico"
-    },
-    "paracetamol": {
-        "id": 2,
-        "nome": "Paracetamol 750mg",
-        "preco": 12.50,
-        "categoria": "Analgésico",
-        "descricao": "Analgésico e antitérmico"
-    },
-    "amoxicilina": {
-        "id": 3,
-        "nome": "Amoxicilina 500mg",
-        "preco": 45.00,
-        "categoria": "Antibiótico",
-        "descricao": "Antibiótico de amplo espectro"
-    },
-    "losartana": {
-        "id": 4,
-        "nome": "Losartana Potássica 50mg",
-        "preco": 38.90,
-        "categoria": "Cardiovascular",
-        "descricao": "Anti-hipertensivo"
-    },
-    "metformina": {
-        "id": 5,
-        "nome": "Metformina 850mg",
-        "preco": 22.30,
-        "categoria": "Diabetes",
-        "descricao": "Antidiabético"
-    },
-    "omeprazol": {
-        "id": 6,
-        "nome": "Omeprazol 20mg",
-        "preco": 28.50,
-        "categoria": "Gastrointestinal",
-        "descricao": "Inibidor de bomba de prótons"
-    },
-    "ibuprofeno": {
-        "id": 7,
-        "nome": "Ibuprofeno 600mg",
-        "preco": 18.90,
-        "categoria": "Anti-inflamatório",
-        "descricao": "Anti-inflamatório não esteroidal"
-    },
-    "azitromicina": {
-        "id": 8,
-        "nome": "Azitromicina 500mg",
-        "preco": 65.00,
-        "categoria": "Antibiótico",
-        "descricao": "Antibiótico macrolídeo"
-    },
-    "vitamina_c": {
-        "id": 9,
-        "nome": "Vitamina C 1g",
-        "preco": 35.00,
-        "categoria": "Suplemento",
-        "descricao": "Suplemento vitamínico"
-    },
-    "sertralina": {
-        "id": 10,
-        "nome": "Cloridrato de Sertralina 50mg",
-        "preco": 55.00,
-        "categoria": "Saúde Mental",
-        "descricao": "Antidepressivo"
-    }
-}
 
 # ============================================
 # SERVIÇO IA
@@ -165,42 +54,77 @@ PRODUTOS = {
 
 class IAService:
     def __init__(self):
-        self.limite_orcamento_auto = LIMITE_ORCAMENTO_AUTO
-        self.produtos = PRODUTOS
+        self.limite_orcamento_auto = config.LIMITE_ORCAMENTO_AUTO
         self.start_time = time.time()
         self.requests_count = 0
         self.errors_count = 0
-        logger.info(f"IA Service iniciado. Limite auto: R$ {self.limite_orcamento_auto:.2f}")
-        logger.info(f"Produtos disponíveis: {len(self.produtos)}")
+        self.cache_hits = 0
+        self.cache_misses = 0
+        logger.info(
+            f"IA Service iniciado. Limite auto: R$ {self.limite_orcamento_auto:.2f}"
+        )
 
     def get_uptime(self) -> float:
         return time.time() - self.start_time
 
-    def classificar_intencao(self, mensagem: str) -> Dict[str, Any]:
+    def classificar_intencao(self, mensagem: str) -> dict[str, Any]:
         """Classifica a intenção do cliente"""
         mensagem_lower = mensagem.lower()
 
         padroes = {
             "orcamento": [
-                "quanto custa", "preço", "valor", "orçamento", "precisa de receita",
-                "custa", "qual o valor", "precinho", "quanto está", "precifica"
+                "quanto custa",
+                "preço",
+                "valor",
+                "orçamento",
+                "precisa de receita",
+                "custa",
+                "qual o valor",
+                "precinho",
+                "quanto está",
+                "precifica",
             ],
             "pedido": [
-                "quero comprar", "pedir", "encomendar", "gostaria de", "queria",
-                "comprar", "adquirir", "reservar", "encomenda"
+                "quero comprar",
+                "pedir",
+                "encomendar",
+                "gostaria de",
+                "queria",
+                "comprar",
+                "adquirir",
+                "reservar",
+                "encomenda",
+                "quero",
             ],
             "duvida": [
-                "como funciona", "o que é", "para que serve", "como tomar",
-                "indicação", "contra indicação", "efeitos colaterais"
+                "como funciona",
+                "o que é",
+                "para que serve",
+                "como tomar",
+                "indicação",
+                "contra indicação",
+                "efeitos colaterais",
             ],
             "entrega": [
-                "entrega", "frete", "prazo", "chegada", "demora", "envio",
-                "transportadora", "retirada", "entrega em domicílio"
+                "entrega",
+                "frete",
+                "prazo",
+                "chegada",
+                "demora",
+                "envio",
+                "transportadora",
+                "retirada",
             ],
             "receita": [
-                "receita", "prescrição", "médico", "receitar", "receitado",
-                "precisa de receita", "com receita", "sem receita"
-            ]
+                "receita",
+                "prescrição",
+                "médico",
+                "receitar",
+                "receitado",
+                "precisa de receita",
+                "com receita",
+                "sem receita",
+            ],
         }
 
         for categoria, palavras in padroes.items():
@@ -210,21 +134,60 @@ class IAService:
 
         return {"categoria": "geral", "confianca": 0.4}
 
-    def extrair_produtos(self, mensagem: str, produtos_especificos: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    def extrair_produtos(
+        self, mensagem: str, produtos_especificos: list[str] | None = None
+    ) -> list[dict[str, Any]]:
         """Extrai nomes de produtos da mensagem"""
+        produtos_db = {
+            "dipirona": {
+                "id": 1,
+                "nome": "Dipirona Sódica 500mg",
+                "preco": 15.90,
+                "categoria": "Analgésico",
+            },
+            "paracetamol": {
+                "id": 2,
+                "nome": "Paracetamol 750mg",
+                "preco": 12.50,
+                "categoria": "Analgésico",
+            },
+            "amoxicilina": {
+                "id": 3,
+                "nome": "Amoxicilina 500mg",
+                "preco": 45.00,
+                "categoria": "Antibiótico",
+            },
+            "losartana": {
+                "id": 4,
+                "nome": "Losartana Potássica 50mg",
+                "preco": 38.90,
+                "categoria": "Cardiovascular",
+            },
+            "metformina": {
+                "id": 5,
+                "nome": "Metformina 850mg",
+                "preco": 22.30,
+                "categoria": "Diabetes",
+            },
+        }
+
         if produtos_especificos:
-            return [self.produtos.get(p) for p in produtos_especificos if p in self.produtos]
+            return [
+                produtos_db.get(p) for p in produtos_especificos if p in produtos_db
+            ]
 
         produtos_encontrados = []
         mensagem_lower = mensagem.lower()
 
-        for key, produto in self.produtos.items():
+        for key, produto in produtos_db.items():
             if key in mensagem_lower or produto["nome"].lower() in mensagem_lower:
                 produtos_encontrados.append(produto)
 
         return produtos_encontrados
 
-    def calcular_orcamento(self, produtos: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def calcular_orcamento(
+        self, produtos: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
         """Calcula orçamento com base nos produtos"""
         if not produtos:
             return None
@@ -235,13 +198,16 @@ class IAService:
         for p in produtos:
             quantidade = p.get("quantidade", 1)
             subtotal = p["preco"] * quantidade
-            itens.append({
-                "nome": p["nome"],
-                "preco": p["preco"],
-                "quantidade": quantidade,
-                "subtotal": subtotal,
-                "categoria": p["categoria"]
-            })
+            itens.append(
+                {
+                    "id": p.get("id"),
+                    "nome": p["nome"],
+                    "preco": p["preco"],
+                    "quantidade": quantidade,
+                    "subtotal": subtotal,
+                    "categoria": p.get("categoria", ""),
+                }
+            )
             total += subtotal
 
         return {
@@ -249,12 +215,18 @@ class IAService:
             "total": total,
             "total_formatado": f"R$ {total:.2f}",
             "quantidade": len(produtos),
-            "precisa_receita": any(p["categoria"] == "Antibiótico" for p in produtos),
-            "produtos_unicos": len(set(p["nome"] for p in produtos))
+            "precisa_receita": any(
+                p.get("categoria") == "Antibiótico" for p in produtos
+            ),
+            "produtos_unicos": len(set(p["nome"] for p in produtos)),
         }
 
-    def gerar_resposta(self, mensagem: str, orcamento: Optional[Dict[str, Any]],
-                       classificacao: Dict[str, Any]) -> str:
+    def gerar_resposta(
+        self,
+        mensagem: str,
+        orcamento: dict[str, Any] | None,
+        classificacao: dict[str, Any],
+    ) -> str:
         """Gera resposta baseada no contexto"""
         if not orcamento:
             return self._gerar_resposta_sem_produto(mensagem, classificacao)
@@ -264,7 +236,9 @@ class IAService:
 
         return self._gerar_resposta_padrao(orcamento)
 
-    def _gerar_resposta_sem_produto(self, mensagem: str, classificacao: Dict[str, Any]) -> str:
+    def _gerar_resposta_sem_produto(
+        self, mensagem: str, classificacao: dict[str, Any]
+    ) -> str:
         """Gera resposta quando nenhum produto foi identificado"""
         if classificacao["categoria"] == "pedido":
             return "Entendi que você deseja fazer um pedido. Poderia me informar qual produto você gostaria de comprar? 🛒"
@@ -277,15 +251,15 @@ class IAService:
 
         return "Desculpe, não entendi sobre qual produto você gostaria de informação. Poderia me informar o nome do medicamento? 💊"
 
-    def _gerar_resposta_com_receita(self, orcamento: Dict[str, Any]) -> str:
+    def _gerar_resposta_com_receita(self, orcamento: dict[str, Any]) -> str:
         """Gera resposta para produtos que precisam de receita"""
         itens_texto = self._formatar_itens(orcamento["itens"])
 
-        return f"""📋 *Orçamento para {orcamento['quantidade']} produto(s)*
+        return f"""📋 *Orçamento para {orcamento["quantidade"]} produto(s)*
 
 {itens_texto}
 
-💰 *Total: {orcamento['total_formatado']}*
+💰 *Total: {orcamento["total_formatado"]}*
 
 ⚠️ *ATENÇÃO:* Este medicamento requer receita médica.
 Um de nossos atendentes vai entrar em contato para dar continuidade.
@@ -293,15 +267,15 @@ Um de nossos atendentes vai entrar em contato para dar continuidade.
 🔹 *Este orçamento foi gerado automaticamente e está sujeito à confirmação.*
 📝 *Para agilizar, tenha sua receita em mãos.*"""
 
-    def _gerar_resposta_padrao(self, orcamento: Dict[str, Any]) -> str:
+    def _gerar_resposta_padrao(self, orcamento: dict[str, Any]) -> str:
         """Gera resposta padrão para orçamento"""
         itens_texto = self._formatar_itens(orcamento["itens"])
 
-        return f"""📋 *Orçamento para {orcamento['quantidade']} produto(s)*
+        return f"""📋 *Orçamento para {orcamento["quantidade"]} produto(s)*
 
 {itens_texto}
 
-💰 *Total: {orcamento['total_formatado']}*
+💰 *Total: {orcamento["total_formatado"]}*
 
 ✅ *Todos os produtos estão disponíveis em estoque.*
 
@@ -310,18 +284,31 @@ Um de nossos atendentes vai entrar em contato para dar continuidade.
 
 💡 *Dica:* Se quiser finalizar a compra, um atendente vai te ajudar!"""
 
-    def _formatar_itens(self, itens: List[Dict[str, Any]]) -> str:
+    def _formatar_itens(self, itens: list[dict[str, Any]]) -> str:
         """Formata lista de itens para resposta"""
-        return "\n".join([
-            f"• {item['nome']} - R$ {item['preco']:.2f} (x{item['quantidade']}) = R$ {item['subtotal']:.2f}"
-            for item in itens
-        ])
+        return "\n".join(
+            [
+                f"• {item['nome']} - R$ {item['preco']:.2f} (x{item['quantidade']}) = R$ {item['subtotal']:.2f}"
+                for item in itens
+            ]
+        )
 
-    def processar_mensagem(self, request: OrcamentoRequest) -> OrcamentoResponse:
+    async def processar_mensagem(self, request: OrcamentoRequest) -> OrcamentoResponse:
         """Processa a mensagem e retorna resposta"""
         start_time = time.time()
 
         try:
+            # Verificar cache
+            cache_key = f"orcamento:{request.cliente_id}:{request.loja_id}:{hash(request.mensagem)}"
+            cached = await cache_service.get(cache_key)
+
+            if cached:
+                self.cache_hits += 1
+                logger.info(f"Cache hit para cliente {request.cliente_id}")
+                return OrcamentoResponse(**cached)
+
+            self.cache_misses += 1
+
             # Classificar intenção
             classificacao = self.classificar_intencao(request.mensagem)
 
@@ -342,28 +329,35 @@ Um de nossos atendentes vai entrar em contato para dar continuidade.
             # Atualizar métricas
             self.requests_count += 1
 
-            return OrcamentoResponse(
+            response = OrcamentoResponse(
                 orcamento=orcamento,
                 precisa_humano=precisa_humano,
                 motivo=motivo,
                 resposta_ia=resposta,
                 produtos=produtos if produtos else None,
-                tempo_processamento=time.time() - start_time
+                tempo_processamento=time.time() - start_time,
             )
+
+            # Salvar no cache
+            await cache_service.set(cache_key, response.dict(), 300)
+
+            return response
 
         except Exception as e:
             self.errors_count += 1
-            logger.error(f"Erro ao processar mensagem: {str(e)}")
+            logger.error(f"Erro ao processar mensagem: {e!s}")
             raise
 
-    def _decidir_intervencao_humana(self, classificacao: Dict[str, Any],
-                                   orcamento: Optional[Dict[str, Any]],
-                                   mensagem: str) -> tuple:
+    def _decidir_intervencao_humana(
+        self,
+        classificacao: dict[str, Any],
+        orcamento: dict[str, Any] | None,
+        mensagem: str,
+    ) -> tuple:
         """Decide se é necessária intervenção humana"""
         precisa_humano = False
         motivo = None
 
-        # Casos que precisam de humano
         if classificacao["categoria"] == "pedido":
             precisa_humano = True
             motivo = "Pedido de compra requer atendimento humano"
@@ -386,26 +380,6 @@ Um de nossos atendentes vai entrar em contato para dar continuidade.
 
         return precisa_humano, motivo
 
-    def get_status(self) -> IAStatusResponse:
-        """Retorna o status do serviço"""
-        return IAStatusResponse(
-            status="online",
-            service="IA Service",
-            version="2.0.0",
-            produtos_disponiveis=len(self.produtos),
-            limite_orcamento_auto=self.limite_orcamento_auto,
-            timestamp=datetime.now().isoformat(),
-            uptime=self.get_uptime()
-        )
-
-    def get_produtos(self) -> Dict[str, Any]:
-        """Retorna a lista de produtos"""
-        return {"produtos": self.produtos}
-
-# ============================================
-# INSTÂNCIA DO SERVIÇO
-# ============================================
-
 
 ia_service = IAService()
 
@@ -418,12 +392,35 @@ ia_service = IAService()
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("🚀 IA Service iniciando...")
-    logger.info(f"📦 Produtos disponíveis: {len(ia_service.produtos)}")
-    logger.info(f"💰 Limite orçamento automático: R$ {ia_service.limite_orcamento_auto:.2f}")
+    logger.info(
+        f"💰 Limite orçamento automático: R$ {ia_service.limite_orcamento_auto:.2f}"
+    )
+
+    # Testar Redis
+    try:
+        await cache_service.set("health_check", {"status": "ok"}, 10)
+        logger.info("✅ Redis conectado com sucesso")
+    except Exception as e:
+        logger.warning(f"⚠️ Redis não disponível: {e}")
+
+    # Testar banco
+    try:
+        from sqlalchemy import text
+
+        async with db_service.async_session() as session:
+            await session.execute(text("SELECT 1"))
+        logger.info("✅ Banco de dados conectado com sucesso")
+    except Exception as e:
+        logger.warning(f"⚠️ Banco de dados não disponível: {e}")
+
     yield
+
     # Shutdown
     logger.info("🛑 IA Service desligando...")
-    logger.info(f"📊 Estatísticas finais: {ia_service.requests_count} requisições, {ia_service.errors_count} erros")
+    logger.info(
+        f"📊 Estatísticas: {ia_service.requests_count} requisições, {ia_service.errors_count} erros"
+    )
+
 
 # ============================================
 # FASTAPI APP
@@ -431,16 +428,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="SaaS IA Service",
-    description="Serviço de IA para orçamentos e atendimento",
+    description="Serviço de IA para orçamentos e atendimento com cache Redis",
     version="2.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 # ============================================
 # MIDDLEWARES
 # ============================================
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -450,7 +446,6 @@ app.add_middleware(
 )
 
 
-# Logging middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
@@ -465,15 +460,6 @@ async def log_requests(request: Request, call_next):
     return response
 
 
-# Error handler
-@app.exception_handler(Exception)
-async def generic_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Erro não tratado: {str(exc)}")
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"error": "Erro interno do servidor", "detail": str(exc)}
-    )
-
 # ============================================
 # ENDPOINTS
 # ============================================
@@ -486,58 +472,66 @@ async def root():
         "version": "2.0.0",
         "status": "online",
         "docs": "/docs",
-        "health": "/api/ia/health"
+        "health": "/api/ia/health",
     }
 
 
-@app.get("/api/ia/health", response_model=HealthResponse)
+@app.get("/api/ia/health")
 async def health_check():
-    return HealthResponse(
-        status="healthy",
-        service="IA Service",
-        timestamp=datetime.now().isoformat(),
-        uptime=ia_service.get_uptime(),
-        version="2.0.0"
-    )
+    redis_status = "ok"
+    try:
+        await cache_service.set("health_check", {"status": "ok"}, 10)
+    except Exception as e:
+        redis_status = f"error: {e!s}"
 
+    db_status = "ok"
+    try:
+        from sqlalchemy import text
 
-@app.get("/api/ia/status", response_model=IAStatusResponse)
-async def get_status():
-    """Retorna o status detalhado do serviço"""
-    return ia_service.get_status()
-
-
-@app.get("/api/ia/produtos")
-async def listar_produtos():
-    """Lista todos os produtos disponíveis"""
-    return ia_service.get_produtos()
-
-
-@app.get("/api/ia/produtos/search")
-async def buscar_produtos(q: Optional[str] = None):
-    """Busca produtos pelo nome"""
-    if not q:
-        return {"produtos": []}
-
-    q_lower = q.lower()
-    resultados = [
-        p for p in ia_service.produtos.values()
-        if q_lower in p["nome"].lower() or q_lower in p["categoria"].lower()
-    ]
+        async with db_service.async_session() as session:
+            await session.execute(text("SELECT 1"))
+    except Exception as e:
+        db_status = f"error: {e!s}"
 
     return {
-        "query": q,
-        "total": len(resultados),
-        "produtos": resultados
+        "status": "healthy"
+        if redis_status == "ok" and db_status == "ok"
+        else "degraded",
+        "service": "IA Service",
+        "version": "2.0.0",
+        "timestamp": datetime.now().isoformat(),
+        "uptime": ia_service.get_uptime(),
+        "redis": redis_status,
+        "database": db_status,
+    }
+
+
+@app.get("/api/ia/status")
+async def get_status():
+    return {
+        "status": "online",
+        "service": "IA Service",
+        "version": "2.0.0",
+        "uptime": ia_service.get_uptime(),
+        "requests": ia_service.requests_count,
+        "errors": ia_service.errors_count,
+        "cache_hits": ia_service.cache_hits,
+        "cache_misses": ia_service.cache_misses,
+        "cache_ratio": ia_service.cache_hits
+        / max(ia_service.cache_hits + ia_service.cache_misses, 1)
+        * 100,
+        "limite_orcamento_auto": ia_service.limite_orcamento_auto,
+        "timestamp": datetime.now().isoformat(),
     }
 
 
 @app.post("/api/ia/orcamento", response_model=OrcamentoResponse)
 async def processar_orcamento(request: OrcamentoRequest):
-    """Processa uma requisição de orçamento"""
     try:
-        logger.info(f"Processando orçamento: cliente={request.cliente_id}, loja={request.loja_id}")
-        response = ia_service.processar_mensagem(request)
+        logger.info(
+            f"Processando orçamento: cliente={request.cliente_id}, loja={request.loja_id}"
+        )
+        response = await ia_service.processar_mensagem(request)
 
         if response.precisa_humano:
             logger.info(f"🔄 Intervenção humana necessária: {response.motivo}")
@@ -545,24 +539,59 @@ async def processar_orcamento(request: OrcamentoRequest):
         return response
 
     except ValueError as e:
-        logger.error(f"Erro de validação: {str(e)}")
+        logger.error(f"Erro de validação: {e!s}")
         raise HTTPException(status_code=400, detail=str(e))
 
     except Exception as e:
-        logger.error(f"Erro ao processar orçamento: {str(e)}")
-        raise HTTPException(status_code=500, detail="Erro interno ao processar orçamento")
+        logger.error(f"Erro ao processar orçamento: {e!s}")
+        raise HTTPException(
+            status_code=500, detail="Erro interno ao processar orçamento"
+        )
 
 
-@app.get("/api/ia/metrics")
-async def get_metrics():
-    """Retorna métricas do serviço"""
+@app.get("/api/ia/produtos")
+async def listar_produtos(loja_id: int = 1, limit: int = 20):
+    try:
+        produtos = await db_service.get_produtos_by_nome("", loja_id, limit)
+        return {"produtos": produtos, "total": len(produtos)}
+    except Exception as e:
+        logger.error(f"Erro ao listar produtos: {e!s}")
+        return {"produtos": [], "total": 0, "error": str(e)}
+
+
+@app.get("/api/ia/produtos/search")
+async def buscar_produtos(q: str, loja_id: int = 1, limit: int = 10):
+    try:
+        produtos = await db_service.get_produtos_by_nome(q, loja_id, limit)
+        return {"query": q, "total": len(produtos), "produtos": produtos}
+    except Exception as e:
+        logger.error(f"Erro ao buscar produtos: {e!s}")
+        return {"query": q, "total": 0, "produtos": [], "error": str(e)}
+
+
+@app.get("/api/ia/cache")
+async def get_cache_info():
     return {
-        "total_requests": ia_service.requests_count,
-        "total_errors": ia_service.errors_count,
-        "error_rate": (ia_service.errors_count / max(ia_service.requests_count, 1)) * 100,
-        "uptime": ia_service.get_uptime(),
-        "produtos_disponiveis": len(ia_service.produtos)
+        "cache_service": "redis",
+        "stats": {
+            "hits": ia_service.cache_hits,
+            "misses": ia_service.cache_misses,
+            "ratio": ia_service.cache_hits
+            / max(ia_service.cache_hits + ia_service.cache_misses, 1)
+            * 100,
+        },
     }
+
+
+@app.delete("/api/ia/cache")
+async def clear_cache(pattern: str | None = None):
+    if pattern:
+        deleted = await cache_service.delete_pattern(f"*{pattern}*")
+        return {"message": f"Cache limpo para padrão: {pattern}", "deleted": deleted}
+    else:
+        await cache_service.delete_pattern("*")
+        return {"message": "Cache limpo completamente"}
+
 
 # ============================================
 # PROMETHEUS METRICS
@@ -576,14 +605,14 @@ except Exception as e:
     logger.warning(f"⚠️ Prometheus metrics disabled: {e}")
 
 # ============================================
-# MAIN
+# EXECUÇÃO
 # ============================================
 
 if __name__ == "__main__":
     uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8001,
-        log_level=LOG_LEVEL.lower(),
-        workers=2
+        "app.main:app",
+        host=config.IA_HOST,
+        port=config.IA_PORT,
+        log_level=config.LOG_LEVEL.lower(),
+        workers=2,
     )

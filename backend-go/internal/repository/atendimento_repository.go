@@ -40,6 +40,8 @@ func (r *AtendimentoRepository) CriarAtendimento(atendimento *models.Atendimento
 	atendimento.ID = int(id)
 	atendimento.Status = models.StatusAguardando
 	atendimento.IniciadoEm = time.Now()
+	atendimento.CreatedAt = time.Now()
+	atendimento.UpdatedAt = time.Now()
 	return nil
 }
 
@@ -48,23 +50,29 @@ func (r *AtendimentoRepository) BuscarAtendimentoPorID(id int) (*models.Atendime
 	query := `
 		SELECT a.id, a.cliente_id, a.loja_id, a.status, a.iniciado_em,
 		       a.finalizado_em, a.atendente_id, a.tempo_espera, a.tempo_atendimento,
-		       c.id, c.nome, c.telefone, c.email
+		       a.created_at, a.updated_at,
+		       c.id, c.nome, c.telefone, c.email,
+		       u.id, u.nome as atendente_nome
 		FROM atendimentos a
 		JOIN clientes c ON a.cliente_id = c.id
+		LEFT JOIN usuarios u ON a.atendente_id = u.id
 		WHERE a.id = ?
 	`
 
 	var a models.Atendimento
 	var c models.Cliente
-	var finalizadoEm sql.NullTime
-	var atendenteID sql.NullInt64
-	var tempoEspera, tempoAtendimento sql.NullInt64
+	var u models.Usuario
+	var atendenteID, tempoEspera, tempoAtendimento sql.NullInt64
+	var finalizadoEmTime sql.NullTime
+	var atendenteNome sql.NullString
 
 	err := r.db.QueryRow(query, id).Scan(
 		&a.ID, &a.ClienteID, &a.LojaID, &a.Status,
-		&a.IniciadoEm, &finalizadoEm, &atendenteID,
+		&a.IniciadoEm, &finalizadoEmTime, &atendenteID,
 		&tempoEspera, &tempoAtendimento,
+		&a.CreatedAt, &a.UpdatedAt,
 		&c.ID, &c.Nome, &c.Telefone, &c.Email,
+		&u.ID, &atendenteNome,
 	)
 
 	if err != nil {
@@ -74,18 +82,24 @@ func (r *AtendimentoRepository) BuscarAtendimentoPorID(id int) (*models.Atendime
 		return nil, fmt.Errorf("erro ao buscar atendimento: %w", err)
 	}
 
-	if finalizadoEm.Valid {
-		a.FinalizadoEm = &finalizadoEm.Time
+	if finalizadoEmTime.Valid {
+		a.FinalizadoEm = &finalizadoEmTime.Time
 	}
 	if atendenteID.Valid {
 		id := int(atendenteID.Int64)
 		a.AtendenteID = &id
 	}
 	if tempoEspera.Valid {
-		// tempo_espera não está mapeado no modelo atual; ignorando
+		val := int(tempoEspera.Int64)
+		a.TempoEspera = &val
 	}
 	if tempoAtendimento.Valid {
-		// tempo_atendimento não está mapeado no modelo atual
+		val := int(tempoAtendimento.Int64)
+		a.TempoAtendimento = &val
+	}
+	if atendenteNome.Valid {
+		u.Nome = atendenteNome.String
+		a.Atendente = &u
 	}
 
 	a.Cliente = &c
@@ -106,7 +120,7 @@ func (r *AtendimentoRepository) BuscarAtendimentosAtivos(lojaID int) ([]*models.
 
 	rows, err := r.db.Query(query, lojaID, models.StatusAguardando, models.StatusEmAtendimento)
 	if err != nil {
-		return nil, fmt.Errorf("erro ao buscar atendimentos: %w", err)
+		return nil, fmt.Errorf("erro ao buscar atendimentos ativos: %w", err)
 	}
 	defer rows.Close()
 
@@ -141,98 +155,57 @@ func (r *AtendimentoRepository) BuscarAtendimentosAtivos(lojaID int) ([]*models.
 	return atendimentos, nil
 }
 
-// BuscarAtendimentosPorCliente busca atendimentos de um cliente específico
-func (r *AtendimentoRepository) BuscarAtendimentosPorCliente(clienteID int, limit int) ([]*models.Atendimento, error) {
+// ListarAtendimentos lista atendimentos com paginação
+func (r *AtendimentoRepository) ListarAtendimentos(lojaID int, limit, offset int) ([]*models.AtendimentoResumo, error) {
 	if limit == 0 {
-		limit = 10
+		limit = 50
 	}
 
 	query := `
-		SELECT id, cliente_id, loja_id, status, iniciado_em,
-		       finalizado_em, atendente_id
-		FROM atendimentos
-		WHERE cliente_id = ?
-		ORDER BY iniciado_em DESC
-		LIMIT ?
-	`
-
-	rows, err := r.db.Query(query, clienteID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("erro ao buscar atendimentos do cliente: %w", err)
-	}
-	defer rows.Close()
-
-	var atendimentos []*models.Atendimento
-	for rows.Next() {
-		var a models.Atendimento
-		var finalizadoEm sql.NullTime
-		var atendenteID sql.NullInt64
-
-		err := rows.Scan(
-			&a.ID, &a.ClienteID, &a.LojaID, &a.Status,
-			&a.IniciadoEm, &finalizadoEm, &atendenteID,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("erro ao scanear atendimento: %w", err)
-		}
-
-		if finalizadoEm.Valid {
-			a.FinalizadoEm = &finalizadoEm.Time
-		}
-		if atendenteID.Valid {
-			id := int(atendenteID.Int64)
-			a.AtendenteID = &id
-		}
-
-		atendimentos = append(atendimentos, &a)
-	}
-
-	return atendimentos, nil
-}
-
-// BuscarAtendimentosPorStatus busca atendimentos por status
-func (r *AtendimentoRepository) BuscarAtendimentosPorStatus(lojaID int, status string) ([]*models.Atendimento, error) {
-	query := `
-		SELECT a.id, a.cliente_id, a.loja_id, a.status, a.iniciado_em,
-		       a.finalizado_em, a.atendente_id,
-		       c.id, c.nome, c.telefone, c.email
+		SELECT a.id, a.cliente_id, c.nome, c.telefone, a.status,
+		       a.iniciado_em, 
+		       TIMESTAMPDIFF(SECOND, a.iniciado_em, NOW()) as tempo_decorrido,
+		       (SELECT m.conteudo FROM mensagens m 
+		        WHERE m.atendimento_id = a.id 
+		        ORDER BY m.enviado_em DESC LIMIT 1) as ultima_mensagem,
+		       (SELECT m.enviado_em FROM mensagens m 
+		        WHERE m.atendimento_id = a.id 
+		        ORDER BY m.enviado_em DESC LIMIT 1) as ultima_mensagem_em
 		FROM atendimentos a
 		JOIN clientes c ON a.cliente_id = c.id
-		WHERE a.loja_id = ? AND a.status = ?
+		WHERE a.loja_id = ?
 		ORDER BY a.iniciado_em DESC
+		LIMIT ? OFFSET ?
 	`
 
-	rows, err := r.db.Query(query, lojaID, status)
+	rows, err := r.db.Query(query, lojaID, limit, offset)
 	if err != nil {
-		return nil, fmt.Errorf("erro ao buscar atendimentos por status: %w", err)
+		return nil, fmt.Errorf("erro ao listar atendimentos: %w", err)
 	}
 	defer rows.Close()
 
-	var atendimentos []*models.Atendimento
+	var atendimentos []*models.AtendimentoResumo
 	for rows.Next() {
-		var a models.Atendimento
-		var c models.Cliente
-		var finalizadoEm sql.NullTime
-		var atendenteID sql.NullInt64
+		var a models.AtendimentoResumo
+		var ultimaMensagem sql.NullString
+		var ultimaMensagemEm sql.NullTime
 
 		err := rows.Scan(
-			&a.ID, &a.ClienteID, &a.LojaID, &a.Status,
-			&a.IniciadoEm, &finalizadoEm, &atendenteID,
-			&c.ID, &c.Nome, &c.Telefone, &c.Email,
+			&a.ID, &a.ClienteID, &a.ClienteNome, &a.ClienteTelefone,
+			&a.Status, &a.IniciadoEm, &a.TempoDecorrido,
+			&ultimaMensagem, &ultimaMensagemEm,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("erro ao scanear atendimento: %w", err)
 		}
 
-		if finalizadoEm.Valid {
-			a.FinalizadoEm = &finalizadoEm.Time
+		if ultimaMensagem.Valid {
+			a.UltimaMensagem = ultimaMensagem.String
 		}
-		if atendenteID.Valid {
-			id := int(atendenteID.Int64)
-			a.AtendenteID = &id
+		if ultimaMensagemEm.Valid {
+			a.UltimaMensagemEm = &ultimaMensagemEm.Time
 		}
 
-		a.Cliente = &c
 		atendimentos = append(atendimentos, &a)
 	}
 
@@ -240,182 +213,236 @@ func (r *AtendimentoRepository) BuscarAtendimentosPorStatus(lojaID int, status s
 }
 
 // ============================================
-// ATUALIZAÇÕES
+// ATUALIZAÇÃO DE STATUS
 // ============================================
 
 // AtualizarStatusAtendimento atualiza o status de um atendimento
-func (r *AtendimentoRepository) AtualizarStatusAtendimento(atendimentoID int, status string, atendenteID *int) error {
+func (r *AtendimentoRepository) AtualizarStatusAtendimento(atendimentoID int, status string, atendenteID int) error {
 	query := `UPDATE atendimentos SET status = ?`
 	args := []interface{}{status}
 
-	if atendenteID != nil {
+	if atendenteID > 0 {
 		query += `, atendente_id = ?`
-		args = append(args, *atendenteID)
+		args = append(args, atendenteID)
 	}
 
-	if status == models.StatusFinalizado {
+	if status == models.StatusFinalizado || status == models.StatusAbandonado {
 		query += `, finalizado_em = NOW()`
 	}
 
-	query += ` WHERE id = ?`
+	query += `, updated_at = NOW() WHERE id = ?`
 	args = append(args, atendimentoID)
 
 	_, err := r.db.Exec(query, args...)
-	return err
+	if err != nil {
+		return fmt.Errorf("erro ao atualizar status do atendimento: %w", err)
+	}
+	return nil
 }
 
 // IniciarAtendimento marca um atendimento como em andamento
 func (r *AtendimentoRepository) IniciarAtendimento(atendimentoID int, atendenteID int) error {
 	_, err := r.db.Exec(`
 		UPDATE atendimentos 
-		SET status = ?, atendente_id = ?
+		SET status = ?, atendente_id = ?, tempo_espera = TIMESTAMPDIFF(SECOND, iniciado_em, NOW()), updated_at = NOW()
 		WHERE id = ?
 	`, models.StatusEmAtendimento, atendenteID, atendimentoID)
-	return err
+	if err != nil {
+		return fmt.Errorf("erro ao iniciar atendimento: %w", err)
+	}
+	return nil
 }
 
 // FinalizarAtendimento finaliza um atendimento
 func (r *AtendimentoRepository) FinalizarAtendimento(atendimentoID int) error {
 	_, err := r.db.Exec(`
 		UPDATE atendimentos 
-		SET status = ?, finalizado_em = NOW()
+		SET status = ?, finalizado_em = NOW(), 
+		    tempo_atendimento = TIMESTAMPDIFF(SECOND, iniciado_em, NOW()), updated_at = NOW()
 		WHERE id = ?
 	`, models.StatusFinalizado, atendimentoID)
-	return err
-}
-
-// AbandonarAtendimento marca um atendimento como abandonado
-func (r *AtendimentoRepository) AbandonarAtendimento(atendimentoID int) error {
-	_, err := r.db.Exec(`
-		UPDATE atendimentos 
-		SET status = ?, finalizado_em = NOW()
-		WHERE id = ?
-	`, models.StatusAbandonado, atendimentoID)
-	return err
-}
-
-// ============================================
-// MÉTRICAS
-// ============================================
-
-// ContarAtendimentosPorStatus conta atendimentos por status
-func (r *AtendimentoRepository) ContarAtendimentosPorStatus(lojaID int, status string) (int, error) {
-	var count int
-	query := `SELECT COUNT(*) FROM atendimentos WHERE loja_id = ? AND status = ?`
-	err := r.db.QueryRow(query, lojaID, status).Scan(&count)
-	return count, err
-}
-
-// CalcularTempoMedioAtendimento calcula o tempo médio de atendimento
-func (r *AtendimentoRepository) CalcularTempoMedioAtendimento(lojaID int) (float64, error) {
-	var tempoMedio sql.NullFloat64
-	query := `
-		SELECT AVG(TIMESTAMPDIFF(SECOND, iniciado_em, finalizado_em))
-		FROM atendimentos
-		WHERE loja_id = ? AND status = ? AND finalizado_em IS NOT NULL
-	`
-	err := r.db.QueryRow(query, lojaID, models.StatusFinalizado).Scan(&tempoMedio)
 	if err != nil {
-		return 0, err
+		return fmt.Errorf("erro ao finalizar atendimento: %w", err)
 	}
-	if !tempoMedio.Valid {
-		return 0, nil
-	}
-	return tempoMedio.Float64, nil
-}
-
-// CalcularTempoMedioEspera calcula o tempo médio de espera
-func (r *AtendimentoRepository) CalcularTempoMedioEspera(lojaID int) (int, error) {
-	var tempoMedio sql.NullInt64
-	query := `
-		SELECT AVG(tempo_espera)
-		FROM atendimentos
-		WHERE loja_id = ? AND status IN (?, ?) AND tempo_espera IS NOT NULL
-	`
-	err := r.db.QueryRow(query, lojaID, models.StatusEmAtendimento, models.StatusFinalizado).Scan(&tempoMedio)
-	if err != nil {
-		return 0, err
-	}
-	if !tempoMedio.Valid {
-		return 0, nil
-	}
-	return int(tempoMedio.Int64), nil
-}
-
-// ContarAtendimentosHoje conta atendimentos de hoje
-func (r *AtendimentoRepository) ContarAtendimentosHoje(lojaID int) (int, error) {
-	var count int
-	query := `
-		SELECT COUNT(*) FROM atendimentos 
-		WHERE loja_id = ? AND DATE(iniciado_em) = CURDATE()
-	`
-	err := r.db.QueryRow(query, lojaID).Scan(&count)
-	return count, err
-}
-
-// ContarAtendimentosMes conta atendimentos do mês
-func (r *AtendimentoRepository) ContarAtendimentosMes(lojaID int) (int, error) {
-	var count int
-	query := `
-		SELECT COUNT(*) FROM atendimentos 
-		WHERE loja_id = ? AND MONTH(iniciado_em) = MONTH(CURDATE()) 
-		AND YEAR(iniciado_em) = YEAR(CURDATE())
-	`
-	err := r.db.QueryRow(query, lojaID).Scan(&count)
-	return count, err
+	return nil
 }
 
 // ============================================
-// RELATÓRIOS
+// MENSAGENS
 // ============================================
 
-// ObterMetricasDiarias obtém métricas diárias de atendimento
-func (r *AtendimentoRepository) ObterMetricasDiarias(lojaID int, dias int) ([]map[string]interface{}, error) {
-	if dias == 0 {
-		dias = 7
-	}
-
+// EnviarMensagem envia uma nova mensagem no atendimento
+func (r *AtendimentoRepository) EnviarMensagem(mensagem *models.Mensagem) error {
 	query := `
-		SELECT 
-			DATE(iniciado_em) as data,
-			COUNT(*) as total,
-			SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as finalizados,
-			SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as abandonados,
-			AVG(TIMESTAMPDIFF(SECOND, iniciado_em, finalizado_em)) as tempo_medio
-		FROM atendimentos
-		WHERE loja_id = ? AND iniciado_em >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
-		GROUP BY DATE(iniciado_em)
-		ORDER BY data DESC
+		INSERT INTO mensagens (atendimento_id, remetente, conteudo, tipo, arquivo_url, arquivo_nome, arquivo_tamanho, enviado_em)
+		VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
 	`
 
-	rows, err := r.db.Query(query, models.StatusFinalizado, models.StatusAbandonado, lojaID, dias)
+	result, err := r.db.Exec(query,
+		mensagem.AtendimentoID, mensagem.Remetente, mensagem.Conteudo,
+		mensagem.Tipo, mensagem.ArquivoURL, mensagem.ArquivoNome,
+		mensagem.ArquivoTamanho,
+	)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("erro ao enviar mensagem: %w", err)
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("erro ao obter ID da mensagem: %w", err)
+	}
+
+	mensagem.ID = int(id)
+	mensagem.EnviadoEm = time.Now()
+	mensagem.CreatedAt = time.Now()
+	mensagem.UpdatedAt = time.Now()
+	return nil
+}
+
+// ListarMensagens lista mensagens de um atendimento
+func (r *AtendimentoRepository) ListarMensagens(atendimentoID int) ([]*models.Mensagem, error) {
+	query := `
+		SELECT id, atendimento_id, remetente, conteudo, tipo,
+		       arquivo_url, arquivo_nome, arquivo_tamanho, lida, enviado_em,
+		       created_at, updated_at
+		FROM mensagens
+		WHERE atendimento_id = ?
+		ORDER BY enviado_em ASC
+	`
+
+	rows, err := r.db.Query(query, atendimentoID)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao listar mensagens: %w", err)
 	}
 	defer rows.Close()
 
-	var resultados []map[string]interface{}
+	var mensagens []*models.Mensagem
 	for rows.Next() {
-		var data string
-		var total, finalizados, abandonados int
-		var tempoMedio sql.NullFloat64
-
-		if err := rows.Scan(&data, &total, &finalizados, &abandonados, &tempoMedio); err != nil {
-			continue
+		var m models.Mensagem
+		err := rows.Scan(
+			&m.ID, &m.AtendimentoID, &m.Remetente, &m.Conteudo, &m.Tipo,
+			&m.ArquivoURL, &m.ArquivoNome, &m.ArquivoTamanho, &m.Lida, &m.EnviadoEm,
+			&m.CreatedAt, &m.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("erro ao scanear mensagem: %w", err)
 		}
-
-		resultado := map[string]interface{}{
-			"data":         data,
-			"total":        total,
-			"finalizados":  finalizados,
-			"abandonados":  abandonados,
-			"taxa_sucesso": float64(finalizados) / float64(total+1) * 100,
-		}
-		if tempoMedio.Valid {
-			resultado["tempo_medio"] = tempoMedio.Float64
-		}
-		resultados = append(resultados, resultado)
+		mensagens = append(mensagens, &m)
 	}
 
-	return resultados, nil
+	return mensagens, nil
+}
+
+// BuscarMensagem busca uma mensagem por ID
+func (r *AtendimentoRepository) BuscarMensagem(id int) (*models.Mensagem, error) {
+	query := `
+		SELECT id, atendimento_id, remetente, conteudo, tipo,
+		       arquivo_url, arquivo_nome, arquivo_tamanho, lida, enviado_em,
+		       created_at, updated_at
+		FROM mensagens
+		WHERE id = ?
+	`
+
+	var m models.Mensagem
+	err := r.db.QueryRow(query, id).Scan(
+		&m.ID, &m.AtendimentoID, &m.Remetente, &m.Conteudo, &m.Tipo,
+		&m.ArquivoURL, &m.ArquivoNome, &m.ArquivoTamanho, &m.Lida, &m.EnviadoEm,
+		&m.CreatedAt, &m.UpdatedAt,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("erro ao buscar mensagem: %w", err)
+	}
+
+	return &m, nil
+}
+
+// MarcarMensagemLida marca uma mensagem como lida
+func (r *AtendimentoRepository) MarcarMensagemLida(id int) error {
+	_, err := r.db.Exec(`UPDATE mensagens SET lida = TRUE, updated_at = NOW() WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("erro ao marcar mensagem como lida: %w", err)
+	}
+	return nil
+}
+
+// ============================================
+// ESTATÍSTICAS
+// ============================================
+
+// GetAtendimentoStats retorna estatísticas de atendimentos
+func (r *AtendimentoRepository) GetAtendimentoStats(lojaID int) (*models.AtendimentoStats, error) {
+	var stats models.AtendimentoStats
+
+	// Total de atendimentos
+	err := r.db.QueryRow(`
+		SELECT COUNT(*) FROM atendimentos WHERE loja_id = ?
+	`, lojaID).Scan(&stats.TotalAtendimentos)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao contar atendimentos: %w", err)
+	}
+
+	// Em atendimento
+	err = r.db.QueryRow(`
+		SELECT COUNT(*) FROM atendimentos WHERE loja_id = ? AND status = ?
+	`, lojaID, models.StatusEmAtendimento).Scan(&stats.EmAtendimento)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao contar em atendimento: %w", err)
+	}
+
+	// Aguardando
+	err = r.db.QueryRow(`
+		SELECT COUNT(*) FROM atendimentos WHERE loja_id = ? AND status = ?
+	`, lojaID, models.StatusAguardando).Scan(&stats.Aguardando)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao contar aguardando: %w", err)
+	}
+
+	// Finalizados
+	err = r.db.QueryRow(`
+		SELECT COUNT(*) FROM atendimentos WHERE loja_id = ? AND status = ?
+	`, lojaID, models.StatusFinalizado).Scan(&stats.Finalizados)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao contar finalizados: %w", err)
+	}
+
+	// Abandonados
+	err = r.db.QueryRow(`
+		SELECT COUNT(*) FROM atendimentos WHERE loja_id = ? AND status = ?
+	`, lojaID, models.StatusAbandonado).Scan(&stats.Abandonados)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao contar abandonados: %w", err)
+	}
+
+	// Tempo médio de espera
+	err = r.db.QueryRow(`
+		SELECT COALESCE(AVG(tempo_espera), 0) FROM atendimentos 
+		WHERE loja_id = ? AND tempo_espera IS NOT NULL
+	`, lojaID).Scan(&stats.TempoMedioEspera)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao calcular tempo médio de espera: %w", err)
+	}
+
+	// Tempo médio de atendimento
+	err = r.db.QueryRow(`
+		SELECT COALESCE(AVG(tempo_atendimento), 0) FROM atendimentos 
+		WHERE loja_id = ? AND tempo_atendimento IS NOT NULL
+	`, lojaID).Scan(&stats.TempoMedioAtendimento)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao calcular tempo médio de atendimento: %w", err)
+	}
+
+	// Ticket médio
+	err = r.db.QueryRow(`
+		SELECT COALESCE(AVG(o.total), 0) FROM orcamentos o
+		JOIN atendimentos a ON o.atendimento_id = a.id
+		WHERE a.loja_id = ? AND o.status = 'aprovado'
+	`, lojaID).Scan(&stats.TicketMedio)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao calcular ticket médio: %w", err)
+	}
+
+	return &stats, nil
 }
